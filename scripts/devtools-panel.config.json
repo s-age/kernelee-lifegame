@@ -1,0 +1,12 @@
+{
+  "//": "Appearance settings for the kernelee-devtools-bridge panel. `npm run devtools` passes this file via --panel-config; the panel fetches it as /panel-config.json and merges it over the built-in defaults. The partColors keys are part kinds (pipeline/switch/emitter/mutator/bridge); the values are card fill colors. Omitted keys fall back to the bridge-side defaults (light pastels, all 10 pairs CVD-verified).",
+  "//editors": "open-in-editor settings. defaultEditor is the initial selection among the built-ins (vscode/vscode-insiders/cursor/windsurf/zed — only those whose app itself registers a URL scheme); a manual selection in the panel (localStorage) always wins. Editors not built in can be added/replaced via editors: [{id, label, urlTemplate}] (a matching id replaces the built-in). urlTemplate placeholders are {path} (absolute path, slashes preserved) / {line} / {column}. Example: {\"id\": \"idea\", \"label\": \"IntelliJ IDEA\", \"urlTemplate\": \"idea://open?file={path}&line={line}\"} (macOS only, no Toolbox needed). repoRoot is not written here — it is a machine-specific runtime fact, so the bridge server injects it into the /panel-config.json response (default: the cwd of npm run devtools).",
+  "defaultEditor": "vscode",
+  "partColors": {
+    "pipeline": "#f1f3f6",
+    "switch": "#fbe7a2",
+    "emitter": "#b1a0e6",
+    "mutator": "#f6c3bb",
+    "bridge": "#b3d6f9"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.claude/
+.agents/
+.mcp.json
+knowledge/
+*.log
+.DS_Store

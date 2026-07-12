@@ -1,0 +1,367 @@
+// CircuitTests (headless) — verify the tick loop (divert) and the Sim operations by running the whole kernel.
+// No UI: driven solely by makeTestKernel (the same wiring as production) + calls via SimPort.
+
+import { describe, expect, it } from 'vitest';
+import { SettingsPort, SimPort } from '../src/contract/ports';
+import { GridState, LoopState, SimState, StatsState, StrokeState, type ForkGranularity } from '../src/contract/states';
+import { makeTestKernel } from './testKernel';
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Place a horizontal blinker at (1,2)-(3,2). */
+async function placeBlinker(kernel: ReturnType<typeof makeTestKernel>): Promise<void> {
+  await kernel.call(SimPort.toggleCell, { x: 1, y: 2 });
+  await kernel.call(SimPort.toggleCell, { x: 2, y: 2 });
+  await kernel.call(SimPort.toggleCell, { x: 3, y: 2 });
+}
+
+describe('Circuit.Sim.step', () => {
+  it('advances exactly one generation without changing running (the blinker turns vertical)', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+
+    await kernel.call(SimPort.step);
+
+    const grid = kernel.buffer.read(GridState);
+    expect(grid.generation).toBe(1);
+    expect(kernel.buffer.read(LoopState).phase).toBe('idle');
+    const alive = new Set<number>();
+    grid.cells.forEach((cell, index) => {
+      if (cell === 1) alive.add(index);
+    });
+    // Vertical blinker: (2,1),(2,2),(2,3)
+    expect(alive).toEqual(new Set([1 * grid.width + 2, 2 * grid.width + 2, 3 * grid.width + 2]));
+  });
+
+  it('step does not launch the loop (generation does not keep growing afterwards)', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SimPort.step);
+    await sleep(80);
+    expect(kernel.buffer.read(GridState).generation).toBe(1);
+  });
+});
+
+describe('Circuit.Sim.play / pause — the divert loop', () => {
+  it('play spins the generation loop and pause stops it', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SettingsPort.setSpeed, 200); // 5ms/generation
+
+    await kernel.call(SimPort.play);
+    expect(kernel.buffer.read(LoopState).phase).toBe('running');
+    await sleep(150);
+    await kernel.call(SimPort.pause);
+    // pause only drops the phase to 'stopping' synchronously — there is a lag
+    // until the loop itself notices at the next lap's gate and settles on
+    // 'idle' (the sleep(100) window below).
+    expect(kernel.buffer.read(LoopState).phase).toBe('stopping');
+
+    const generationAtPause = kernel.buffer.read(GridState).generation;
+    expect(generationAtPause).toBeGreaterThanOrEqual(3); // definitely spun a few laps
+
+    await sleep(100); // wait for the in-flight lap to reach the gate and exit
+    expect(kernel.buffer.read(LoopState).phase).toBe('idle'); // settled from 'stopping'
+    const settled = kernel.buffer.read(GridState).generation;
+    await sleep(150);
+    expect(kernel.buffer.read(GridState).generation).toBe(settled); // no longer growing
+  });
+
+  it('pause → play re-entry never duplicates the run (verified via the generation growth rate)', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SettingsPort.setSpeed, 100); // 10ms/generation (ideal rate)
+
+    await kernel.call(SimPort.play);
+    await sleep(120);
+    await kernel.call(SimPort.pause);
+    await sleep(100); // wait for the natural stop
+
+    // Restart + multiple plays while running (all should be absorbed by the double-start guard)
+    await kernel.call(SimPort.play);
+    await kernel.call(SimPort.play);
+    await kernel.call(SimPort.play);
+    const before = kernel.buffer.read(GridState).generation;
+    await sleep(400);
+    await kernel.call(SimPort.pause);
+    await sleep(100);
+    const gained = kernel.buffer.read(GridState).generation - before;
+
+    // A single run ideally does ~40 generations/400ms (actual is below that due
+    // to timer granularity). A duplicated run would be ~2x — pin single-run
+    // behavior with 1.25x (50) as the upper bound.
+    expect(gained).toBeGreaterThanOrEqual(5); // the restart is really spinning
+    expect(gained).toBeLessThan(50); // no duplicated run
+  });
+
+  it('an immediate play right after pause (without waiting for the natural stop) never duplicates the run — actually stepping into the 50ms-slice window (regression test)', async () => {
+    // The test above sleeps(100) after pause before re-playing, longer than
+    // tickLoop's 50ms slice, so by re-entry the phase is already 'idle'
+    // (naturally stopped) — it never stepped into the window the LoopState
+    // unification is meant to protect: "the old loop is still 'stopping' when
+    // the next play arrives". Here play follows pause immediately, with no
+    // sleep in between — verifying that the old loop flips back to 'running',
+    // reuses itself, and never double-launches.
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SettingsPort.setSpeed, 20); // 50ms/generation — one generation as long as a whole slice
+
+    await kernel.call(SimPort.play);
+    await sleep(120); // ensure a few generations have definitely run
+    await kernel.call(SimPort.pause);
+    expect(kernel.buffer.read(LoopState).phase).toBe('stopping'); // not 'idle' yet
+    await kernel.call(SimPort.play); // immediate re-entry without waiting for the natural stop — the window itself
+    expect(kernel.buffer.read(LoopState).phase).toBe('running'); // the same loop recovered
+
+    const before = kernel.buffer.read(GridState).generation;
+    await sleep(400); // ~8 generations at the ideal rate
+    await kernel.call(SimPort.pause);
+    await sleep(150);
+    const gained = kernel.buffer.read(GridState).generation - before;
+
+    expect(gained).toBeGreaterThanOrEqual(3); // really spinning
+    expect(gained).toBeLessThan(12); // not a duplicated run (~16 generations)
+  });
+});
+
+describe('Circuit.Sim.step — entry gate (the invariant is owned by circuit)', () => {
+  it('a step while running aborts and the generation does not advance', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    // Only raise the phase without launching the loop (isolated gate verification).
+    kernel.buffer.mutate(LoopState, () => ({ phase: 'running' as const }));
+
+    await kernel.call(SimPort.step);
+    expect(kernel.buffer.read(GridState).generation).toBe(0); // the gate aborted
+
+    kernel.buffer.mutate(LoopState, () => ({ phase: 'idle' as const }));
+    await kernel.call(SimPort.step);
+    expect(kernel.buffer.read(GridState).generation).toBe(1); // passes while stopped
+  });
+
+  it("a step during 'stopping' also aborts (blocked unless idle, one notch stricter than running alone)", async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    kernel.buffer.mutate(LoopState, () => ({ phase: 'stopping' as const }));
+
+    await kernel.call(SimPort.step);
+    expect(kernel.buffer.read(GridState).generation).toBe(0); // the gate aborted
+  });
+});
+
+describe('StatsState — stats emit for board transitions', () => {
+  it('step emits the generation stats pipeline-produced (blinker: alive 3 / births 2 / deaths 2)', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SimPort.step);
+    expect(kernel.buffer.read(StatsState)).toEqual({ alive: 3, births: 2, deaths: 2 });
+  });
+
+  it('toggleCell emits as a transition too', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SimPort.toggleCell, { x: 0, y: 0 });
+    expect(kernel.buffer.read(StatsState)).toEqual({ alive: 1, births: 1, deaths: 0 });
+    await kernel.call(SimPort.toggleCell, { x: 0, y: 0 });
+    expect(kernel.buffer.read(StatsState)).toEqual({ alive: 0, births: 0, deaths: 1 });
+  });
+
+  it('randomize emits as a transition from the previous board (alive = actual count)', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SimPort.randomize);
+    const grid = kernel.buffer.read(GridState);
+    const alive = grid.cells.reduce<number>((sum, cell) => sum + cell, 0);
+    const stats = kernel.buffer.read(StatsState);
+    expect(stats.alive).toBe(alive);
+    expect(stats.births).toBe(alive); // a transition from an empty board, so births = alive
+    expect(stats.deaths).toBe(0);
+  });
+});
+
+describe('Circuit.Sim.stroke — stroke interpretation of normalized pointers', () => {
+  /** Normalized coordinates pointing at the center of cell (x, y). */
+  function centerOf(kernel: ReturnType<typeof makeTestKernel>, x: number, y: number) {
+    const grid = kernel.buffer.read(GridState);
+    return { u: (x + 0.5) / grid.width, v: (y + 0.5) / grid.height };
+  }
+
+  it('start→move→end toggles cells, and consecutive moves in the same cell are deduped', async () => {
+    const kernel = makeTestKernel();
+    const grid = kernel.buffer.read(GridState);
+
+    await kernel.call(SimPort.strokeStart, centerOf(kernel, 1, 1));
+    await kernel.call(SimPort.strokeMove, centerOf(kernel, 1, 1)); // same cell — suppressed
+    await kernel.call(SimPort.strokeMove, centerOf(kernel, 2, 1)); // on to the neighbor
+    await kernel.call(SimPort.strokeEnd);
+
+    const cells = kernel.buffer.read(GridState).cells;
+    expect(cells[1 * grid.width + 1]).toBe(1); // a double hit would have flipped it back to 0
+    expect(cells[1 * grid.width + 2]).toBe(1);
+  });
+
+  it('moves outside a stroke are ignored (the sensor is expected to send everything)', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SimPort.strokeMove, centerOf(kernel, 3, 3)); // no start
+    expect(kernel.buffer.read(GridState).cells.every((cell) => cell === 0)).toBe(true);
+
+    await kernel.call(SimPort.strokeStart, centerOf(kernel, 3, 3));
+    await kernel.call(SimPort.strokeEnd);
+    await kernel.call(SimPort.strokeMove, centerOf(kernel, 4, 4)); // ignored after end too
+    const grid = kernel.buffer.read(GridState);
+    expect(grid.cells[3 * grid.width + 3]).toBe(1); // only the single hit from start
+    expect(grid.cells[4 * grid.width + 4]).toBe(0);
+  });
+
+  it('points outside the board do not toggle', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SimPort.strokeStart, { u: 1.2, v: 0.5 });
+    await kernel.call(SimPort.strokeEnd);
+    expect(kernel.buffer.read(GridState).cells.every((cell) => cell === 0)).toBe(true);
+  });
+});
+
+describe('Circuit.Settings.setGranularity — fork granularity', () => {
+  it('setGranularity updates SimState and ignores unknown values', async () => {
+    const kernel = makeTestKernel();
+    expect(kernel.buffer.read(SimState).granularity).toBe('chunk');
+
+    await kernel.call(SettingsPort.setGranularity, 'cell');
+    expect(kernel.buffer.read(SimState).granularity).toBe('cell');
+
+    await kernel.call(SettingsPort.setGranularity, 'bogus' as never);
+    expect(kernel.buffer.read(SimState).granularity).toBe('cell'); // unchanged
+  });
+
+  it('4 glider generations produce the identical board at every granularity (chunk / row / cell)', async () => {
+    // The degenerate form of "cell = pipeline" (cell granularity), and one row
+    // per branch (row), must both converge to the same board as the chunk split
+    // through the Emitter's order-preserving join.
+    const boards = new Map<ForkGranularity, Uint8Array>();
+    let width = 0;
+    for (const granularity of ['chunk', 'row', 'cell'] as const) {
+      const kernel = makeTestKernel();
+      // Place a glider at (1,0),(2,1),(0,2),(1,2),(2,2)
+      for (const [x, y] of [[1, 0], [2, 1], [0, 2], [1, 2], [2, 2]] as const) {
+        await kernel.call(SimPort.toggleCell, { x, y });
+      }
+      await kernel.call(SettingsPort.setGranularity, granularity);
+      for (let i = 0; i < 4; i++) await kernel.call(SimPort.step);
+
+      const grid = kernel.buffer.read(GridState);
+      expect(grid.generation).toBe(4);
+      boards.set(granularity, grid.cells);
+      width = grid.width;
+    }
+
+    expect(boards.get('row')).toEqual(boards.get('chunk'));
+    expect(boards.get('cell')).toEqual(boards.get('chunk'));
+
+    // Direct verification against the known solution: a glider moves (+1, +1) in 4 generations.
+    const expected = new Set(
+      [[2, 1], [3, 2], [1, 3], [2, 3], [3, 3]].map(([x, y]) => y * width + x),
+    );
+    const alive = new Set<number>();
+    boards.get('chunk')!.forEach((cell, index) => {
+      if (cell === 1) alive.add(index);
+    });
+    expect(alive).toEqual(expected);
+  });
+
+  it('the loop keeps spinning after a granularity switch while running (runtime selection of the divert target)', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SettingsPort.setSpeed, 200); // 5ms/generation
+
+    await kernel.call(SimPort.play);
+    await sleep(80);
+    const beforeSwitch = kernel.buffer.read(GridState).generation;
+    expect(beforeSwitch).toBeGreaterThanOrEqual(2);
+
+    await kernel.call(SettingsPort.setGranularity, 'row'); // diverts to the row loop from the next lap
+    await sleep(80);
+    const afterSwitch = kernel.buffer.read(GridState).generation;
+    expect(afterSwitch).toBeGreaterThan(beforeSwitch); // generations keep advancing across the switch
+
+    await kernel.call(SimPort.pause);
+    await sleep(100);
+  });
+});
+
+describe('Circuit.Sim.toggleCell / setSpeed / randomize', () => {
+  it('toggleCell flips the cell and swaps the reference copy-on-write', async () => {
+    const kernel = makeTestKernel();
+    const before = kernel.buffer.read(GridState);
+
+    await kernel.call(SimPort.toggleCell, { x: 3, y: 4 });
+    const after = kernel.buffer.read(GridState);
+    expect(after.cells).not.toBe(before.cells); // the reference changes (React change detection depends on it)
+    expect(after.cells[4 * after.width + 3]).toBe(1);
+    expect(before.cells[4 * before.width + 3]).toBe(0); // the old snapshot is immutable
+
+    await kernel.call(SimPort.toggleCell, { x: 3, y: 4 });
+    expect(kernel.buffer.read(GridState).cells[4 * after.width + 3]).toBe(0);
+  });
+
+  it('setSpeed updates genPerSec and clamps non-positive values', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SettingsPort.setSpeed, 30);
+    expect(kernel.buffer.read(SimState).genPerSec).toBe(30);
+    await kernel.call(SettingsPort.setSpeed, -5);
+    expect(kernel.buffer.read(SimState).genPerSec).toBe(0.1);
+  });
+
+  it('randomize fills the board and resets generation to 0', async () => {
+    const kernel = makeTestKernel();
+    await placeBlinker(kernel);
+    await kernel.call(SimPort.step);
+    expect(kernel.buffer.read(GridState).generation).toBe(1);
+
+    await kernel.call(SimPort.randomize);
+    const grid = kernel.buffer.read(GridState);
+    expect(grid.generation).toBe(0);
+    expect(grid.cells.length).toBe(grid.width * grid.height);
+    const alive = grid.cells.reduce<number>((sum, cell) => sum + cell, 0);
+    expect(alive).toBeGreaterThan(0); // density 0.3 — total extinction is practically impossible
+    expect(alive).toBeLessThan(grid.cells.length);
+  });
+});
+
+describe('no-op writes keep the current reference (the flip side of copy-on-write)', () => {
+  /** Place a 2x2 block (still life) at (1,1)-(2,2). */
+  async function placeBlock(kernel: ReturnType<typeof makeTestKernel>): Promise<void> {
+    await kernel.call(SimPort.toggleCell, { x: 1, y: 1 });
+    await kernel.call(SimPort.toggleCell, { x: 2, y: 1 });
+    await kernel.call(SimPort.toggleCell, { x: 1, y: 2 });
+    await kernel.call(SimPort.toggleCell, { x: 2, y: 2 });
+  }
+
+  it('a step over a still life keeps the StatsState reference (no fresh reference for equal values)', async () => {
+    const kernel = makeTestKernel();
+    await placeBlock(kernel);
+
+    await kernel.call(SimPort.step);
+    const stats = kernel.buffer.read(StatsState);
+    expect(stats).toEqual({ alive: 4, births: 0, deaths: 0 });
+
+    await kernel.call(SimPort.step);
+    expect(kernel.buffer.read(StatsState)).toBe(stats); // equal value → the current reference stays
+    expect(kernel.buffer.read(GridState).generation).toBe(2); // GridState really changes (generation), so it advances
+  });
+
+  it('a strokeEnd outside a stroke (double-sent via pointerLeave) keeps the StrokeState reference', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SimPort.strokeEnd); // arrives without a start (pointerLeave — the sensor sends everything)
+    const stroke = kernel.buffer.read(StrokeState);
+    await kernel.call(SimPort.strokeEnd);
+    expect(kernel.buffer.read(StrokeState)).toBe(stroke);
+  });
+
+  it('same-value setSpeed / setGranularity keep the SimState reference', async () => {
+    const kernel = makeTestKernel();
+    await kernel.call(SettingsPort.setSpeed, 30);
+    const sim = kernel.buffer.read(SimState);
+    await kernel.call(SettingsPort.setSpeed, 30);
+    expect(kernel.buffer.read(SimState)).toBe(sim);
+    await kernel.call(SettingsPort.setGranularity, sim.granularity);
+    expect(kernel.buffer.read(SimState)).toBe(sim);
+  });
+});
