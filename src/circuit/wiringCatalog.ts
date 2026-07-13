@@ -9,6 +9,7 @@ import { SettingsPort, SimPort } from '../contract/ports';
 import { DEFAULT_HEIGHT, DEFAULT_WIDTH } from '../contract/states';
 import { playPipe } from './sim/play';
 import { randomizePipe } from './sim/randomize';
+import { stepPipe } from './sim/step';
 import { stepOncePipeFor } from './sim/stepOnce';
 import { strokeMovePipe, strokeStartPipe } from './sim/stroke';
 import { tickLoopPipeFor } from './sim/tickLoop';
@@ -19,15 +20,18 @@ import { setSpeedPipe } from './settings/setSpeed';
 import { hydratePipe } from './settings/hydrateSettings';
 
 /**
- * Covers all 10 of lifegame's root pipes (independent dispatch/kernel.run entry
+ * Covers all 11 of lifegame's root pipes (independent dispatch/kernel.run entry
  * points). Only the `tickLoop`/`stepOnce` keys go via `CircuitSimKeys` — they
- * are unbound pipes launched directly by divert/kernel.run, so no corresponding
- * `KernelSymbol` exists. The other 8 reference the `KernelSymbol.id` of the
+ * are unbound pipes launched directly by divert, so no corresponding
+ * `KernelSymbol` exists. The other 9 reference the `KernelSymbol.id` of the
  * actually-bound `SimPort`/`SettingsPort` directly (no new hand-typed
- * constants — one more reference site never creates duplication). `play` is now
- * among them: since its launch became a `.spawn` untracked fork branch (play.ts),
- * it is a catalogued saga endpoint whose spawn edge to `tickLoop` is what
- * resolves that loop's former orphanEntry (see scripts/wiringIssueAllowlist.ts).
+ * constants — one more reference site never creates duplication). `play` and
+ * `step` are both among them: since play's launch became a `.spawn` untracked
+ * fork branch (play.ts) and step's launch became an in-pipe `divert` (step.ts),
+ * both are catalogued saga endpoints. play's spawn edge to `tickLoop` resolves
+ * that loop's former orphanEntry; step's divert edge to `stepOnce` resolves
+ * stepOnce's former orphanEntry the same way — a real declared `divertsTo` edge,
+ * not suppression (see scripts/wiringIssueAllowlist.ts).
  *
  * Every entry stays a SOURCE-VISIBLE `describePipe(...)` call in this one
  * function — including toggleCell, which is also `flow()`-bound in
@@ -51,7 +55,13 @@ export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
       CircuitSimKeys.stepOnce,
       'Manual step (stepOnce)',
       stepOncePipeFor('chunk', DEFAULT_WIDTH, DEFAULT_HEIGHT),
-      'Runs the same one generation as the loop body for a single lap, with no sleep/divert. Aborts at the entry gate unless LoopState.phase is idle (the invariant of never stepping while running).',
+      'Runs the same one generation as the loop body for a single lap, with no sleep/divert. Aborts at the entry gate unless LoopState.phase is idle (the invariant of never stepping while running). Reached by step\'s divert (its one real external referrer).',
+    ),
+    describePipe(
+      SimPort.step.id,
+      'Manual step (step)',
+      stepPipe,
+      'Diverts, on-bus, into the size/granularity-specific one-lap pipe (stepOnce) — the visible edge that resolves stepOnce\'s former orphanEntry. Unlike play\'s detached .spawn, this stays a `divert` awaited by kernel.run, so rapid Step clicks serialize instead of racing.',
     ),
     describePipe(
       SimPort.play.id,

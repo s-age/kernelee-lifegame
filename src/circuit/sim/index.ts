@@ -8,6 +8,10 @@
 //   launchArm.switch.ts        Switch: the double-start guard (idle → launch fresh / else recover-only);
 //                              its LoopState write is a declared CI-floor exception (inseparable from the decision)
 //   tickLoop.ts                saga: divert generation loop (+ tickLoopLauncherPipe, play's .spawn branch)
+//   step.ts                    saga: single-stage pipe that diverts into stepOnce (on-bus, awaited —
+//                              the visible edge to stepOnce; divert not spawn, so rapid clicks stay serialized)
+//   stepGranularity.switch.ts  Switch: translates the decision (granularity) into stepOnce's divert
+//                              target (one-shot, not a self-divert)
 //   stepOnce.ts                saga: one gated lap
 //   toggleCell.ts              saga: cell-flip transition (the GridState write is the declared
 //                              CI-floor exception for transitions inseparable from the

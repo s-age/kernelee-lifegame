@@ -13,7 +13,7 @@ import { type SimDevice } from '../../contract/ports';
 import { play } from './play';
 import { randomize } from './randomize';
 import { pause } from './running.mutator';
-import { stepOnce } from './stepOnce';
+import { step } from './step';
 import { strokeMove, strokeStart } from './stroke';
 import { strokeEnd } from './stroke.mutator';
 import { applyToggle } from './toggleCell';
@@ -21,7 +21,7 @@ import { applyToggle } from './toggleCell';
 export const simDevice: SimDevice = {
   play,
   pause,
-  step: stepOnce,
+  step,
   randomize,
   toggleCell: applyToggle,
   strokeStart,

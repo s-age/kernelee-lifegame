@@ -40,13 +40,15 @@ function allStages(stages: readonly StageEntry[]): StageEntry[] {
   ]);
 }
 
-/** The 3 `command`-kind endpoints — bound `portK` port members with no
+/** The 2 `command`-kind endpoints — bound `portK` port members with no
  * `describePipe`d `Pipe` behind them, so `stages: []`/`inputType: null` are
  * honest for these specifically, not the "forgot to write it" case the
- * 10-catalog-pipe floor below polices. (`play` graduated to a catalogued
+ * 11-catalog-pipe floor below polices. (`play` graduated to a catalogued
  * `'endpoint'` when its launch became a `.spawn` untracked fork branch — see
- * play.ts / wiringCatalog.ts — so it is no longer a bare command.) */
-const COMMAND_KEYS = ['Circuit.Sim.pause', 'Circuit.Sim.step', 'Circuit.Sim.strokeEnd'];
+ * play.ts / wiringCatalog.ts. `step` graduated the same way when its launch
+ * became an in-pipe `divert` — see step.ts / wiringCatalog.ts. Neither is a
+ * bare command any longer.) */
+const COMMAND_KEYS = ['Circuit.Sim.pause', 'Circuit.Sim.strokeEnd'];
 
 describe('runIntrospect against the real wiring catalog (index.json schema)', () => {
   let document: IndexDocument;
@@ -61,8 +63,8 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
   }, 15000); // full ts-morph scan — the default 10000ms is tight under load
 
   it('populates every required endpoint/stage/symbol field (no silent empty)', () => {
-    // The 9 describePipe catalog entries + the 4 command endpoints
-    // (play/pause/step/strokeEnd — first-class-tokenized drive sites).
+    // The 11 describePipe catalog entries + the 2 command endpoints
+    // (pause/strokeEnd — first-class-tokenized drive sites).
     expect(document.endpoints).toHaveLength(13);
     for (const endpoint of document.endpoints) {
       const isCommand = endpoint.kind === 'command';
@@ -103,13 +105,14 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
 
   it('classifies endpoint vs divertTarget vs command by boundSymbolIds/describePipe/portK, matching the known catalog shape', () => {
     const byKey = new Map(document.endpoints.map((e) => [e.key, e]));
-    // tickLoop/stepOnce are launched directly via kernel.run and never bound —
-    // permanent divertTarget (the fact paired with the orphanEntry fixed list
-    // in wiringCatalog.test.ts).
+    // tickLoop/stepOnce are never bound and never dispatched directly — each
+    // is reached only by an external divert edge (play → tickLoop,
+    // step → stepOnce) — permanent divertTarget.
     expect(byKey.get('Circuit.Sim.tickLoop')?.kind).toBe('divertTarget');
     expect(byKey.get('Circuit.Sim.stepOnce')?.kind).toBe('divertTarget');
     for (const key of [
-      'Circuit.Sim.play', // now a catalogued saga endpoint (its launch became a .spawn)
+      'Circuit.Sim.play', // catalogued saga endpoint (its launch is a .spawn)
+      'Circuit.Sim.step', // catalogued saga endpoint (its launch is a divert — see step.ts)
       'Circuit.Sim.randomize',
       'Circuit.Sim.toggleCell',
       'Circuit.Sim.strokeStart',
@@ -120,36 +123,41 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     ]) {
       expect(byKey.get(key)?.kind, key).toBe('endpoint');
     }
-    // pause/step/strokeEnd: bound portK members with no describePipe entry —
+    // pause/strokeEnd: bound portK members with no describePipe entry —
     // a THIRD kind, neither 'endpoint' (needs a catalogued Pipe) nor 'divertTarget'.
     for (const key of COMMAND_KEYS) {
       expect(byKey.get(key)?.kind, key).toBe('command');
     }
   });
 
-  it('tickLoop is reached by play\'s .spawn divert edge (not a run launch); stepOnce keeps its run launch', () => {
+  it('tickLoop is reached by play\'s .spawn divert edge; stepOnce is reached by step\'s divert edge (neither is run-launched any more)', () => {
     const tickLoop = document.endpoints.find((e) => e.key === 'Circuit.Sim.tickLoop')!;
     const stepOnce = document.endpoints.find((e) => e.key === 'Circuit.Sim.stepOnce')!;
 
-    // tickLoop: divertTarget, now reached by play's detached `.spawn` launcher,
+    // tickLoop: divertTarget, reached by play's detached `.spawn` launcher,
     // which raw-diverts into the size-specific loop. So its incoming edge is a
     // DIVERT edge (divertedFrom includes the external referrer 'Circuit.Sim.play')
-    // — NOT a `kernel.run` launch anymore (the old launchTickLoop is gone). That
+    // — NOT a `kernel.run` launch (the old launchTickLoop is gone). That
     // external referrer is exactly what resolves its former orphanEntry.
     expect(tickLoop.kind).toBe('divertTarget');
     expect(tickLoop.divertedFrom).toContain('Circuit.Sim.play');
-    expect(tickLoop.drivenBy.every((d) => d.mode !== 'run')).toBe(true); // no run-launch edge remains
+    expect(tickLoop.drivenBy).toEqual([]); // no drive site at all — reached ONLY by divert
 
-    // stepOnce: still launched directly via `kernel.run` (step's own delegate
-    // awaits it), so it keeps its statically-recovered run edge — and, with no
-    // external divertsTo referrer anywhere, it stays a permanent orphanEntry.
+    // stepOnce: divertTarget, reached by step's in-pipe `divert`
+    // (stepGranularity.switch.ts's stepGranularitySwitch) — the SAME
+    // resolution shape as tickLoop (an external divertsTo referrer resolves a
+    // former orphanEntry), but a DIFFERENT verb than play's `.spawn`: a plain
+    // divert, on-bus, awaited by `kernel.run` from step's own one-line
+    // delegate (step.ts). The old direct
+    // `kernel.run(stepOncePipeFor(...))` launch that used to live in
+    // stepOnce.ts is gone, so stepOnce.drivenBy is now empty too, exactly
+    // mirroring tickLoop.
     expect(stepOnce.kind).toBe('divertTarget');
-    expect(stepOnce.drivenBy.length).toBeGreaterThan(0);
-    expect(stepOnce.drivenBy.every((d) => d.mode === 'run')).toBe(true);
-    expect(stepOnce.drivenBy.some((d) => d.owner === 'stepOnce')).toBe(true);
+    expect(stepOnce.divertedFrom).toContain('Circuit.Sim.step');
+    expect(stepOnce.drivenBy).toEqual([]); // no run-launch edge remains — the graph edge is the divert
   });
 
-  it('every command endpoint (play/pause/step/strokeEnd) has a real drive site', () => {
+  it('every command endpoint (pause/strokeEnd) has a real drive site', () => {
     for (const key of COMMAND_KEYS) {
       const endpoint = document.endpoints.find((e) => e.key === key)!;
       expect(endpoint.drivenBy.length, `${key}: command endpoint with no drive site`).toBeGreaterThan(0);
@@ -281,7 +289,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // following picks it up. The same 4 also match diffStats.usedByStagesOf
     // (the shared-symbol test below).
     //
-    // `play` now ALSO appears — a consequence of the detached-fork migration
+    // `play` ALSO appears — a consequence of the detached-fork migration
     // (card 4/4). Its `.spawn` launcher (a closure reused from granularitySwitch)
     // raw-diverts into `tickLoopPipeFor`, and the scan's helper-following walks
     // that factory into the loop's own `appendGeneration` effect — the SAME
@@ -292,25 +300,65 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // richer attribution, not a hole. (A scanner skip-boundary for `.spawn`, à
     // la `kernel.run`, would trim it — a kernelee-mcp-tools concern, out of
     // this card's scope.)
+    //
+    // `step` ALSO appears — the stepOnce-orphan resolution (card B004D425).
+    // step.ts's `stepGranularitySwitch` diverts into `stepOncePipeFor`, and the
+    // same helper-following walks that call into `appendGeneration`'s effect,
+    // reaching step through its first-class divert stage. Unlike play's write
+    // (phase 'detached' — reached through an UNTRACKED `.spawn` branch that
+    // outlives the caller), step's write stays phase 'effect': a plain divert
+    // is followed IN-LINE within the same synchronous stage tree kernel.run
+    // awaits, so it is exactly as "own" a write as stepOnce's own.
     const gridWriters = new Set(
       document.endpoints.filter((e) => e.writesState.some((w) => w.state === 'GridState')).map((e) => e.key),
     );
     expect(gridWriters).toEqual(
-      new Set(['Circuit.Sim.play', 'Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce', 'Circuit.Sim.randomize', 'Circuit.Sim.toggleCell']),
+      new Set([
+        'Circuit.Sim.play',
+        'Circuit.Sim.tickLoop',
+        'Circuit.Sim.step',
+        'Circuit.Sim.stepOnce',
+        'Circuit.Sim.randomize',
+        'Circuit.Sim.toggleCell',
+      ]),
     );
 
     const statsWriters = new Set(
       document.endpoints.filter((e) => e.writesState.some((w) => w.state === 'StatsState')).map((e) => e.key),
     );
     expect(statsWriters).toEqual(
-      new Set(['Circuit.Sim.play', 'Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce', 'Circuit.Sim.randomize', 'Circuit.Sim.toggleCell']),
+      new Set([
+        'Circuit.Sim.play',
+        'Circuit.Sim.tickLoop',
+        'Circuit.Sim.step',
+        'Circuit.Sim.stepOnce',
+        'Circuit.Sim.randomize',
+        'Circuit.Sim.toggleCell',
+      ]),
     );
 
-    // That write lives in appendGeneration's `.effect`, so the phase is 'effect'.
-    for (const key of ['Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce']) {
+    // That write lives in appendGeneration's `.effect`, so the phase is
+    // 'effect' — for step too (a divert, unlike play's `.spawn`, never leaves
+    // the synchronous stage tree, so it never flips to 'detached').
+    for (const key of ['Circuit.Sim.tickLoop', 'Circuit.Sim.step', 'Circuit.Sim.stepOnce']) {
       const endpoint = document.endpoints.find((e) => e.key === key)!;
       expect(endpoint.writesState.find((w) => w.state === 'GridState')?.phase, key).toBe('effect');
     }
+
+    // play's board writes, by contrast, are phase 'detached' (schemaVersion 10):
+    // they are reached THROUGH play's `.spawn` untracked branch (the launcher →
+    // tickLoopPipeFor → appendGeneration effect), which is fire-and-forget and
+    // OUTLIVES play — not play's own synchronous effect. The scanner phases them
+    // 'detached' (the honest WHEN, the same axis 'errorSink' adds for faults),
+    // not 'effect'. play's OWN synchronous write (launchArmGate's LoopState
+    // arm) stays 'stage' — only the untracked subtree flips.
+    const play = document.endpoints.find((e) => e.key === 'Circuit.Sim.play')!;
+    expect(play.writesState.find((w) => w.state === 'GridState')?.phase).toBe('detached');
+    expect(play.writesState.find((w) => w.state === 'StatsState')?.phase).toBe('detached');
+    expect(play.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase).sort()).toEqual([
+      'detached', // the loop's runningPhaseGate write, reached through the branch
+      'stage', // launchArmGate's own synchronous arm write
+    ]);
 
     const states = document.states ?? [];
     // states[].writtenBy records presentation-side observations — direct
@@ -347,7 +395,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
   });
 
   it('declares its own current coverage ceiling honestly (not an aspirational value)', () => {
-    expect(document.meta.schemaVersion).toBe(9);
+    expect(document.meta.schemaVersion).toBe(10);
     // The honest current reach on the TS side — symbol-usage coverage stops at
     // the lower bound of explicit-symbolId stages + static call-site scanning
     // (not complete). It should flip to true only when coverage is actually
@@ -440,6 +488,8 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // recurses untracked branches, so play's `.spawn` launcher contributes a
     // SECOND `granularitySwitch` (the loop's self-divert re-arm is the first),
     // and `launchArmGate` (play's double-start guard entry) appears.
+    // `stepGranularitySwitch` (step.ts's divert into stepOnce) appears once —
+    // a single entry stage, no self-divert twin (stepOnce never diverts back).
     const named = document.endpoints.flatMap((e) => allStages(e.stages)).filter((s) => s.handler !== null);
     expect(named.map((s) => s.handler!.functionName).sort()).toEqual([
       'applyGenerationResult',
@@ -466,6 +516,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       'packRandomizeResult',
       'runningPhaseGate',
       'sleepForSpeed',
+      'stepGranularitySwitch',
     ]);
     expect(named.every((s) => s.symbolId === null)).toBe(true);
   });
@@ -652,18 +703,20 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(offBuffer).toEqual([]);
   });
 
-  it('accounts for every unresolved entry: exactly the known 3 (stateDeclaration + namedMutationVia + one orphanEntry)', () => {
-    // A record of the current reach. The remaining 3 are each either a
-    // detection success or a deliberate scan-scope boundary:
+  it('accounts for every unresolved entry: exactly the known 2 (stateDeclaration + namedMutationVia, zero orphanEntry)', () => {
+    // A record of the current reach. The remaining 2 are each a deliberate
+    // scan-scope boundary, not a hole:
     //   stateDeclaration  — KernelErrorState lives in kernelee core (outside the scan root)
     //   namedMutationVia  — contract states have 0 methods (soft-null; the writes themselves are indexed)
-    //   orphanEntry ×1    — stepOnce only: kernel.run-launched with no external divertsTo referrer
-    //                       (inherent to its launch path; permanent even with a complete catalog).
-    // tickLoop is NO LONGER an orphan (dropped from 2 → 1): the detached-fork
-    // migration (card 4/4) made `play` launch it through a `.spawn` untracked
-    // branch whose launcher declares `divertsTo: [tickLoop]`, giving the loop a
-    // real EXTERNAL referrer (`Circuit.Sim.play`). The orphan check is
-    // unchanged; the topology genuinely gained an edge.
+    // orphanEntry is now ZERO (dropped 1 → 0): stepOnce, the last real orphan
+    // (card B004D425), is resolved the SAME structural way tickLoop's orphan
+    // was (card 4/4) — a distinct catalogued saga node reached by an external
+    // `divertsTo` edge from a calling stage — but with a DIFFERENT verb:
+    // `step` reaches `stepOnce` via `divert` (in-pipe, on-bus, awaited by
+    // `kernel.run`), not play's detached `.spawn`, because step's one-shot lap
+    // has no daemon guard of its own and must stay serialized by the bus (see
+    // step.ts's doc comment). The orphan check is unchanged; the topology
+    // genuinely gained an edge.
     // If this number grows, look at the kind breakdown in the diff first — a
     // total alone cannot reveal offsetting changes.
     const unresolved = document.unresolved ?? [];
@@ -672,9 +725,8 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(Object.fromEntries(byKind)).toEqual({
       stateDeclaration: 1,
       namedMutationVia: 1,
-      orphanEntry: 1,
     });
-    expect(unresolved).toHaveLength(3);
+    expect(unresolved).toHaveLength(2);
   });
 
   it('every pipe(closure) stage always carries a note — the gate/assembly family has no other identity (CI floor)', () => {
@@ -732,7 +784,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     }
   });
 
-  it('parts: all 16 part files (switch 8 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
+  it('parts: all 17 part files (switch 9 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
     // The test above (the handler.site reference floor) is "prevention of dead
     // part files" seen from the filesystem side. This one is the index itself
     // producing the parts section — the subgraph-as-nodes answer to "can this
@@ -741,18 +793,21 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // bless regressions — an expectation-lowering diff is the strongest
     // regression signal).
     //
-    // The 8 switches: granularity / runningPhase / idlePhase / inStroke /
-    // cellVisit / knownGranularity / loadedSettings / launchArm — the last new
-    // in card 4/4 (play's double-start guard, extracted when play became a
-    // saga). The 6 mutators: running (now pause only) / generation / randomize /
-    // toggleCell / stroke / simState. The bridge kind exists as a slot but
-    // lifegame has 0 (the slot existing is itself meaningful — see
+    // The 9 switches: granularity / runningPhase / idlePhase / inStroke /
+    // cellVisit / knownGranularity / loadedSettings / launchArm / stepGranularity
+    // — the last two new: launchArm in card 4/4 (play's double-start guard,
+    // extracted when play became a saga), stepGranularity in card B004D425
+    // (step's divert-target chooser, extracted when step became a saga — the
+    // structural twin of granularity.switch.ts, but a ONE-SHOT hop, not
+    // self-diverting). The 6 mutators: running (now pause only) / generation /
+    // randomize / toggleCell / stroke / simState. The bridge kind exists as a
+    // slot but lifegame has 0 (the slot existing is itself meaningful — see
     // arch-circuit.md), so it does not appear in byKind.
     const parts = document.parts ?? [];
     const byKind = new Map<string, number>();
     for (const part of parts) byKind.set(part.kind, (byKind.get(part.kind) ?? 0) + 1);
-    expect(Object.fromEntries(byKind)).toEqual({ switch: 8, emitter: 2, mutator: 6 });
-    expect(parts).toHaveLength(16);
+    expect(Object.fromEntries(byKind)).toEqual({ switch: 9, emitter: 2, mutator: 6 });
+    expect(parts).toHaveLength(17);
     expect(parts.filter((p) => p.kind === 'bridge')).toEqual([]);
 
     // usedBy is non-empty for every part (empty would raise a partUsage
@@ -800,6 +855,10 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(byId.get('granularity.switch')?.usedBy).toEqual(['Circuit.Sim.play', 'Circuit.Sim.tickLoop']);
     // launchArm.switch: play's double-start guard (new in card 4/4).
     expect(byId.get('launchArm.switch')?.usedBy).toEqual(['Circuit.Sim.play']);
+    // stepGranularity.switch: step's divert-target chooser (new in card
+    // B004D425) — a ONE-SHOT hop into stepOnce, not a self-divert, so unlike
+    // granularity.switch it has exactly one user.
+    expect(byId.get('stepGranularity.switch')?.usedBy).toEqual(['Circuit.Sim.step']);
     // Singly-used parts are indexed too (unlike sharedStages, parts have no shared-count cutoff).
     expect(byId.get('idlePhase.switch')?.usedBy).toEqual(['Circuit.Sim.stepOnce']);
     expect(byId.get('inStroke.switch')?.usedBy).toEqual(['Circuit.Sim.strokeMove']);
