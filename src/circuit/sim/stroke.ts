@@ -7,7 +7,7 @@
 // symbol-calling saga bodies) remains here.
 
 import { next, pipeline, type Kernel, type Pipe, type PipeBuilder } from '@s-age/kernelee';
-import { LifePort, SimPort, type NormalizedPoint } from '../../contract/ports';
+import { LifePort, SimFlowKeys, type NormalizedPoint } from '../../contract/ports';
 import { GridState } from '../../contract/states';
 import { cellVisitGate } from './cellVisit.switch';
 import { inStrokeGate } from './inStroke.switch';
@@ -17,9 +17,17 @@ import { armStrokeState } from './stroke.mutator';
  * The interpretation stage sequence for one stroke point (shared by start /
  * move — the same "append to an arbitrary entry" shape as appendGeneration):
  * assemble HitCellInput → hitCell (symbol) → gate (abort on outside-the-board /
- * same-cell repeats) → divert to togglePipe (a tail call — the toggle's
- * transition handling shares the single toggleCell.ts, and the jump target is
- * declared to introspection via divertsTo).
+ * same-cell repeats) → divert to the toggle flow (a tail call — the toggle's
+ * transition handling shares the single toggleCell.ts).
+ *
+ * The jump target is declared on the TYPED divert tier: `divertsTo` is a map
+ * of kernelee `DispatchKey`s (not free strings), so the gate receives a typed
+ * `diverts` channel as its third argument, tsc pins the payload to the key's
+ * `CellCoord`, and the key is resolved against `builder.flow(...)`'s binding
+ * table at runtime (driver/wiring.ts binds `SimFlowKeys.toggleCell` →
+ * togglePipe). The descriptor's `divertsTo` strings — what introspection
+ * renders — are unchanged (`['Circuit.Sim.toggleCell']`, normalized from the
+ * map), so the wiring graph reads exactly as it did on the free-string tier.
  */
 function appendStrokeVisit(entry: PipeBuilder<NormalizedPoint, NormalizedPoint>): Pipe<NormalizedPoint, never> {
   return entry
@@ -31,7 +39,7 @@ function appendStrokeVisit(entry: PipeBuilder<NormalizedPoint, NormalizedPoint>)
     .pipe(
       {
         note: 'Gate on outside-the-board / same-cell repeats → update stroke state → on to the toggle',
-        divertsTo: [SimPort.toggleCell.id],
+        divertsTo: { toggle: SimFlowKeys.toggleCell },
       },
       cellVisitGate,
     )

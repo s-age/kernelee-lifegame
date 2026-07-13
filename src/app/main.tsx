@@ -12,7 +12,7 @@ import { projectWiringGraph } from '@s-age/kernelee';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { KernelProvider } from '@s-age/react-kernelee';
-import { buildWiringCatalog } from '../circuit/wiringCatalog';
+import { mergeWiringCatalog } from '../circuit/wiringCatalog';
 import { SettingsActions, SimActions } from '../contract/ports';
 import { makeKernel } from '../driver/wiring';
 import { makeSettingsStore } from '../infrastructure/settingsStore';
@@ -36,7 +36,7 @@ const bridge: BridgeConnector | undefined = import.meta.env.DEV
   : undefined;
 
 // Only the composition root knows Infrastructure's runtime dependency (which storage).
-const { kernel, boundSymbolIds } = makeKernel(
+const { kernel, boundSymbolIds, flowCatalog } = makeKernel(
   { settingsStore: makeSettingsStore(window.localStorage) },
   bridge ? { onTrace: bridge.onTrace } : undefined,
 );
@@ -47,7 +47,10 @@ if (bridge) {
   // for the actual post-hydrate granularity (dispatch is fire-and-forget, and
   // on first launch hydrateSettings never touches SimState because of the null
   // gate), so this is accepted as a known limitation.
-  bridge.sendCatalog(projectWiringGraph(buildWiringCatalog(), boundSymbolIds));
+  // The catalog folds the flow-derived entries (builder.flowCatalog, carried
+  // out of makeKernel) over the hand-built describePipe entries — see
+  // mergeWiringCatalog's own doc comment for the dedupe/order rules.
+  bridge.sendCatalog(projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds));
 }
 
 // Startup initialization (outside the view = the composition root, so calling

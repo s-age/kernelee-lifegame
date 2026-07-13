@@ -51,9 +51,16 @@ const COMMAND_PROMOTED_UNLISTED: readonly WiringIssueAllowlistEntry[] = [
  */
 export const RAW_WIRING_ISSUE_ALLOWLIST: readonly WiringIssueAllowlistEntry[] = [
   // tickLoop/stepOnce stay orphanEntry permanently even with a complete
-  // catalog, due to their launch path itself: launched directly via kernel.run
-  // (no bind via register/registerVerb, and zero divertsTo references from
-  // anywhere but tickLoop).
+  // catalog — this is the HONEST CLASSIFICATION of a detached self-loop, not a
+  // hole to be closed. Their launch path itself is the cause: launched directly
+  // via kernel.run (fire-and-forget, no register/registerVerb bind), and the
+  // only divertsTo reference to tickLoop is tickLoop's OWN self-divert (the
+  // generation loop re-arming itself each lap, granularity.switch.ts). An
+  // endpoint whose sole incoming divert edge is its own self-loop has no
+  // EXTERNAL referrer, which is exactly what orphanEntry reports — a
+  // divertTarget-kind entry reachable only by launch + self-divert. Topological,
+  // not a wiring defect; it survives every refactor that keeps the loop
+  // detached (card 6215B789's fault-cleanup extraction does not touch it).
   { kind: 'orphanEntry', key: CircuitSimKeys.tickLoop },
   { kind: 'orphanEntry', key: CircuitSimKeys.stepOnce },
   // The 4 entries that disappear post-assembly via promotion (they do appear in the raw layer).

@@ -15,15 +15,15 @@
 
 import { projectWiringGraph, validateWiringGraph } from '@s-age/kernelee';
 import { describe, expect, it } from 'vitest';
-import { buildWiringCatalog } from '../src/circuit/wiringCatalog';
+import { buildWiringCatalog, mergeWiringCatalog } from '../src/circuit/wiringCatalog';
 import { makeKernel } from '../src/driver/wiring';
 import { makeSettingsStore, memoryStorage } from '../src/infrastructure/settingsStore';
 import { RAW_WIRING_ISSUE_ALLOWLIST } from '../scripts/wiringIssueAllowlist';
 
 describe('buildWiringCatalog + validateWiringGraph', () => {
   it('no issue appears beyond RAW_WIRING_ISSUE_ALLOWLIST, and every listed issue actually appears', () => {
-    const { boundSymbolIds } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
-    const doc = projectWiringGraph(buildWiringCatalog(), boundSymbolIds);
+    const { boundSymbolIds, flowCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
+    const doc = projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds);
     const issues = validateWiringGraph(doc);
 
     const allowedSet = new Set(RAW_WIRING_ISSUE_ALLOWLIST.map((e) => `${e.kind}:${e.key}`));
@@ -35,5 +35,27 @@ describe('buildWiringCatalog + validateWiringGraph', () => {
     for (const entry of RAW_WIRING_ISSUE_ALLOWLIST) {
       expect(issueSet.has(`${entry.kind}:${entry.key}`), `${entry.kind}: ${entry.key}`).toBe(true);
     }
+  });
+
+  it('flowCatalog entries deep-equal their hand-written describePipe twins — the merge substitution is invisible by construction', () => {
+    // The hand entry must stay in buildWiringCatalog (the static scan
+    // attributes per-endpoint facts by the source-visible describePipe calls,
+    // in order), and the flow-derived entry must not drift from it: same key,
+    // same pipe instance (hence deep-equal stages), same title/note. A failure
+    // here means driver/wiring.ts's bindFlows and circuit/wiringCatalog.ts
+    // describe the same pipe differently — fix the drift, never the merge.
+    const { flowCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
+    const handByKey = new Map(buildWiringCatalog().map((entry) => [entry.key, entry]));
+    expect(flowCatalog.length).toBeGreaterThan(0); // the typed tier is actually in use
+    for (const flowEntry of flowCatalog) {
+      const handEntry = handByKey.get(flowEntry.key);
+      expect(handEntry, `flow key '${flowEntry.key}' has no describePipe twin in buildWiringCatalog`).toBeDefined();
+      expect(flowEntry, flowEntry.key).toEqual(handEntry);
+    }
+    // And the merged catalog therefore projects identically to the hand one —
+    // same keys, same order (the order the static scan attributes by).
+    expect(mergeWiringCatalog(flowCatalog).map((e) => e.key)).toEqual(
+      buildWiringCatalog().map((e) => e.key),
+    );
   });
 });

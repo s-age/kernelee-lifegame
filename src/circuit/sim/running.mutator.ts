@@ -16,6 +16,37 @@ import { KernelErrorState, type Kernel } from '@s-age/kernelee';
 import { GridState, LoopState, SimState } from '../../contract/states';
 import { tickLoopPipeFor } from './tickLoop';
 
+/**
+ * Fault cleanup for the detached tick-loop task: settle the phase back to
+ * 'idle' (so the next play can relaunch) and surface the fault on the
+ * framework's KernelErrorState channel. A pure buffer-transition Mutator
+ * (calls no symbols) — the named, discoverable home for what used to be an
+ * anonymous cleanup body inside `launchTickLoop`'s `.catch`.
+ *
+ * The idle settle uses the reference-preserving `idle-if-not-idle` form, the
+ * same canonical LoopState "stop settled" transition runningPhase.switch.ts's
+ * gate applies when the loop stops naturally — the fault path and the normal
+ * stop path now agree on the shape of "lower the phase to idle". They are
+ * deliberately NOT hoisted into one shared helper: the gate's write is a
+ * Switch's decision-inseparable exception (runningPhase.switch.ts's own doc),
+ * this one is a Mutator's buffer transition — two different part kinds, and
+ * coupling them across that boundary would buy nothing the one-line
+ * expression doesn't already state.
+ *
+ * ARCHITECTURAL RESIDUE (followup, not this card): the KernelErrorState write
+ * here manually reproduces what kernelee's default error sink already does for
+ * a failed `dispatch` (`#defaultErrorSink`, `"symbolId: message"`) — it exists
+ * only because `kernel.run(pipe)` has no error-sink channel of its own for a
+ * fire-and-forget launch. A kernelee `run(pipe, { onError })` API would let
+ * this write move into the framework; until then it is an honest app-side
+ * residue, kept here rather than swallowed.
+ */
+export function settleTickLoopFault(kernel: Kernel, error: unknown): void {
+  kernel.buffer.mutate(LoopState, (loop) => (loop.phase === 'idle' ? loop : { phase: 'idle' as const }));
+  const message = error instanceof Error ? error.message : String(error);
+  kernel.buffer.mutate(KernelErrorState, () => ({ message: `Circuit.Sim.tickLoop: ${message}` }));
+}
+
 /** When not running (idle), launch the tick loop (self-divert) fire-and-forget
  * (with a double-start guard). When running or stopping, merely flip that loop
  * back to 'running' (no relaunch). */
@@ -45,9 +76,11 @@ export function launchTickLoop(kernel: Kernel): void {
   if (!wasIdle) return; // double-start guard (pause→play re-entry; from stopping we only recover)
   const grid = kernel.buffer.read(GridState);
   const { granularity } = kernel.buffer.read(SimState);
-  void kernel.run(tickLoopPipeFor(granularity, grid.width, grid.height)).catch((error: unknown) => {
-    kernel.buffer.mutate(LoopState, () => ({ phase: 'idle' as const }));
-    const message = error instanceof Error ? error.message : String(error);
-    kernel.buffer.mutate(KernelErrorState, () => ({ message: `Circuit.Sim.tickLoop: ${message}` }));
-  });
+  // Fire-and-forget (a detached loop must never go on the serial CommandBus).
+  // The `.catch` is the minimal safety net an unexpected thrown exception in a
+  // detached task has nowhere else to land — its body is now the named
+  // Mutator `settleTickLoopFault` (LoopState→idle + KernelErrorState).
+  void kernel.run(tickLoopPipeFor(granularity, grid.width, grid.height)).catch((error: unknown) =>
+    settleTickLoopFault(kernel, error),
+  );
 }

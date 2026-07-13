@@ -24,6 +24,16 @@ import { hydratePipe } from './settings/hydrateSettings';
  * `KernelSymbol` exists. The other 7 reference the `KernelSymbol.id` of the
  * actually-bound `SimPort`/`SettingsPort` directly (no new hand-typed
  * constants — one more reference site never creates duplication).
+ *
+ * Every entry stays a SOURCE-VISIBLE `describePipe(...)` call in this one
+ * function — including toggleCell, which is also `flow()`-bound in
+ * driver/wiring.ts and therefore also appears in `builder.flowCatalog`. That
+ * duplication is deliberate, not an oversight: kernelee-mcp-tools' static
+ * scan attributes every per-endpoint fact (flows/wireSite/readsState/…) BY
+ * CATALOG ORDER against the `describePipe` calls it finds in this function's
+ * own body, so a flow-bound pipe removed from here would silently lose its
+ * static half from the index. `mergeWiringCatalog` below is where the two
+ * sources meet without double-cataloguing.
  */
 export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
   return [
@@ -81,5 +91,38 @@ export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
       hydratePipe,
       'Loads settings from the store once at startup. Missing/corrupt data aborts, keeping the defaults (settings never block startup).',
     ),
+  ];
+}
+
+/**
+ * Fold `KernelBuilder.flowCatalog` (the catalog kernelee derives from the
+ * `builder.flow(...)` binding table — see driver/wiring.ts's `bindFlows`) into
+ * the hand-built catalog above, deduped by key: for a key present in both,
+ * the flow-derived entry wins (it is the one a binding structurally
+ * guarantees — the direction of truth kernelee's `flow()` establishes), while
+ * the hand entry keeps that key's POSITION. Order preservation is
+ * load-bearing, not cosmetic: kernelee-mcp-tools attributes per-endpoint
+ * static facts by catalog order against `buildWiringCatalog`'s source, so the
+ * merged catalog must present the same keys in the same order as the source
+ * `describePipe` calls (a flow entry with no hand twin would land at the tail
+ * and trip the assembly's count-mismatch guard — loudly, by design).
+ *
+ * In practice the substitution is invisible: `bindFlows` passes the same pipe
+ * instance and the same title/note as the hand entry, so the two entries are
+ * deep-equal (tests/wiringCatalog.test.ts pins this). The merge still exists —
+ * with it, the projected catalog's flow-bound entries are DERIVED from the
+ * binding table rather than transcribed by hand, so a future drift between
+ * `flow()` and `describePipe` shows up as a changed projection + a failed
+ * equality test instead of silently shipping the transcription.
+ */
+export function mergeWiringCatalog(
+  flowCatalog: readonly PipeDescriptorEntry[],
+): readonly PipeDescriptorEntry[] {
+  const flowByKey = new Map(flowCatalog.map((entry) => [entry.key, entry]));
+  const hand = buildWiringCatalog();
+  const handKeys = new Set(hand.map((entry) => entry.key));
+  return [
+    ...hand.map((entry) => flowByKey.get(entry.key) ?? entry),
+    ...flowCatalog.filter((entry) => !handKeys.has(entry.key)),
   ];
 }

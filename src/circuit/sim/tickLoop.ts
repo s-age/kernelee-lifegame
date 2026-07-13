@@ -65,6 +65,12 @@ export function tickLoopPipeFor(
     )
       .effect(sleepForSpeed)
       .pipe(
+        // Free-string divertsTo (kernelee's UNCHECKED tier), kept deliberately:
+        // the self-divert's target pipe is selected per lap from runtime buffer
+        // state (granularity AND board size), so it cannot be bound to one
+        // wiring-time key — see granularity.switch.ts's doc comment for the
+        // full reasoning. The stroke→toggle hop (stroke.ts) shows the typed
+        // tier this hop deliberately declines.
         { note: 'Continue to the next generation (divert target selected at runtime by granularity)', divertsTo: [CircuitSimKeys.tickLoop] },
         granularitySwitch,
       )

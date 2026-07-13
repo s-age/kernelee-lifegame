@@ -6,16 +6,16 @@
 // the real repository.
 //
 // projectWiring uses the same expression as main.tsx's bridge send
-// (projectWiringGraph(buildWiringCatalog(), boundSymbolIds)), but injects
-// memoryStorage() rather than the production window.localStorage into the
-// makeKernel that yields boundSymbolIds — it assembles a hermetic, throwaway
-// kernel that never touches real I/O just to read boundSymbolIds.
+// (projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds)), but
+// injects memoryStorage() rather than the production window.localStorage into
+// the makeKernel that yields boundSymbolIds/flowCatalog — it assembles a
+// hermetic, throwaway kernel that never touches real I/O just to read those.
 
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { projectWiringGraph } from '@s-age/kernelee';
 import type { IntrospectConfig } from '@s-age/kernelee-mcp-tools';
-import { buildWiringCatalog } from '../src/circuit/wiringCatalog';
+import { mergeWiringCatalog } from '../src/circuit/wiringCatalog';
 import { makeKernel } from '../src/driver/wiring';
 import { makeSettingsStore, memoryStorage } from '../src/infrastructure/settingsStore';
 import { ASSEMBLED_WIRING_ISSUE_ALLOWLIST } from './wiringIssueAllowlist';
@@ -31,8 +31,8 @@ export default {
   catalogFunction: 'buildWiringCatalog',
   stateFiles: [resolve(repoRoot, 'src/contract/states.ts')],
   projectWiring: () => {
-    const { boundSymbolIds } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
-    return projectWiringGraph(buildWiringCatalog(), boundSymbolIds);
+    const { boundSymbolIds, flowCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
+    return projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds);
   },
   // Detection (validateWiringGraph → unresolved) always runs. The ASSEMBLED-layer
   // allowlist (for post-assembly unresolved = the 2 orphanEntry only; the 4

@@ -5,7 +5,7 @@
 // ★ Vite HMR note: `defineCallable` also keeps a module-global registry
 // (`duplicateSymbolId`) — as with states.ts, never make contract an HMR boundary.
 
-import { actionsOf, defineCallable, port, portK, type CallableDeviceOf } from '@s-age/kernelee';
+import { actionsOf, defineCallable, dispatchKey, port, portK, type CallableDeviceOf } from '@s-age/kernelee';
 import type { CellCoord, ForkGranularity, Stats } from './states';
 
 /** `CellCoord` is defined in contract/states.ts (Stroke keeps it in a Buffer;
@@ -160,6 +160,35 @@ export const SettingsPort = defineCallable('Circuit.Settings', {
     'Reflect saved settings (Infrastructure.Settings.load) into SimState — missing or invalid data keeps the defaults. Dispatched once by app at startup',
   ),
 });
+
+/**
+ * Typed divert-target keys (kernelee `DispatchKey`) — the divert-side
+ * vocabulary, next to the dispatch-side `SimActions` below for the same
+ * reason: a pre-minted, typed token is plain data and belongs in contract.
+ *
+ * A `DispatchKey<P>` is to `divert` what a `KernelSymbol` is to `call`: the
+ * token one side declares (`divertsTo: { toggle: SimFlowKeys.toggleCell }` in
+ * circuit/sim/stroke.ts) and the other side binds
+ * (`builder.flow(SimFlowKeys.toggleCell, …, togglePipe)` in driver/wiring.ts),
+ * with tsc pinning the payload type on both ends. The key STRING is
+ * deliberately `SimPort.toggleCell.id` — the same string the wiring catalog
+ * already keys togglePipe under — so the typed tier changes nothing in the
+ * projected wiring graph (divertedFrom edges, catalog keys, allowlists);
+ * it only adds the compile-time payload check and the kernel-level binding
+ * that the free-string tier never had.
+ *
+ * Only statically-known divert targets get a key. The tick loop's self-divert
+ * target stays on the unchecked tier by design — see
+ * circuit/sim/granularity.switch.ts for the reasoning (the target pipe is
+ * selected per-lap from runtime buffer state, and the 'cell'-granularity
+ * family is deliberately lazy-built).
+ */
+export const SimFlowKeys = {
+  toggleCell: dispatchKey<CellCoord>(
+    SimPort.toggleCell.id,
+    'Flip the given cell dead/alive — the stroke saga diverts here per visited cell',
+  ),
+} as const;
 
 /**
  * Action creators for SimPort — the vocabulary of the dispatching side

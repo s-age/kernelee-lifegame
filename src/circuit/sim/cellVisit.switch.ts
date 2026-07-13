@@ -15,20 +15,37 @@
 // Passed as a bare identifier to `.pipe(meta, cellVisitGate)` (as a named
 // handler it has an address in the index's StageEntry.handler).
 
-import { abort, divert, diversion, type Kernel } from '@s-age/kernelee';
-import type { CellCoord } from '../../contract/ports';
+import { abort, type DivertChannel, type Kernel } from '@s-age/kernelee';
+import { type CellCoord, type SimFlowKeys } from '../../contract/ports';
 import { StrokeState } from '../../contract/states';
-import { togglePipe } from './toggleCell';
+
+/**
+ * The typed divert channel this gate receives as its third argument — built by
+ * kernelee from the calling stage's own `divertsTo: { toggle:
+ * SimFlowKeys.toggleCell }` declaration (circuit/sim/stroke.ts). Deriving the
+ * shape from the minted key (`typeof SimFlowKeys.toggleCell`) keeps the
+ * payload type single-sourced: the key pins `CellCoord` here, at the
+ * declaration site, and at the `builder.flow(...)` binding (driver/wiring.ts)
+ * alike.
+ */
+type CellVisitDiverts = DivertChannel<{ toggle: typeof SimFlowKeys.toggleCell }>;
 
 /**
  * Gate on outside-the-board / same-cell repeats → update stroke state → on to
  * the toggle. The final verb of the appendStrokeVisit shared stage sequence
  * (applies to both strokeStart and strokeMove).
+ *
+ * The toggle hop rides the typed divert tier: `diverts.toggle(cell)` builds a
+ * key-form diversion (`{ key: 'Circuit.Sim.toggleCell', payload: cell }`) the
+ * kernel resolves against its flow table at the moment the verb is
+ * interpreted — this file no longer imports togglePipe at all (the coupling
+ * moved from a value import to a bound key, same as symbol dispatch), and tsc
+ * pins `cell` to the key's `CellCoord` payload type.
  */
-export function cellVisitGate(kernel: Kernel, cell: CellCoord | null) {
+export function cellVisitGate(kernel: Kernel, cell: CellCoord | null, diverts: CellVisitDiverts) {
   if (!cell) return abort(undefined); // outside the board
   const last = kernel.buffer.read(StrokeState).last;
   if (last && last.x === cell.x && last.y === cell.y) return abort(undefined); // suppress same-cell repeats
   kernel.buffer.mutate(StrokeState, (stroke) => ({ ...stroke, last: cell }));
-  return divert(diversion(togglePipe, cell));
+  return diverts.toggle(cell);
 }

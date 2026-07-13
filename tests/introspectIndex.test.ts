@@ -234,7 +234,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(declared.has('KernelErrorState')).toBe(true);
   });
 
-  it('KernelErrorState is tokenized: declaration (null + report) / write (errorSink phase) / read (useKernelError)', () => {
+  it('KernelErrorState is tokenized: declaration (null + report) / write (errorSink phase, in the named fault Mutator) / read (useKernelError)', () => {
     // Declaration: framework-injected (from kernelee's buffer.ts build()), so
     // there is no defineState site inside the app → declaration: null, plus an
     // explicit stateDeclaration unresolved so the "why null" is not silent.
@@ -247,20 +247,30 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // Read: ErrorBanner's useKernelError() shows up in readBy (a separate hook from useBuffer).
     expect(kes.readBy.map((r) => r.site)).toEqual(['src/presentation/ErrorBanner.tsx:10']);
 
-    // Write: the mutate inside play's .catch(). The phase is 'errorSink', not
-    // 'command' (the error-sink path for a failed launched pipe, not a
-    // synchronous effect of play).
+    // Write: the fault cleanup that used to live INLINE in launchTickLoop's
+    // `.catch` is now the named Mutator `settleTickLoopFault` (card 6215B789),
+    // so the KernelErrorState write has a name + address + graph identity — AND
+    // keeps its honest 'errorSink' phase (card 4BA4A40B).
+    //
+    // The write's mutate node no longer sits lexically inside the `.catch`
+    // arrow (it moved into a top-level function), so the scanner's lexical
+    // `commandAccessPhaseOf` alone would recompute it as 'command'. But
+    // `collectCommandFacts` threads the CALL-SITE phase across the
+    // `.catch(err => settleTickLoopFault(kernel, err))` delegation it already
+    // follows for write ATTRIBUTION — so a write reached (transitively) from a
+    // `.catch` call site stays 'errorSink' wherever its body lives. The
+    // extraction is thus fully visible (named Mutator + running.mutator.ts
+    // site) WITHOUT downgrading the fault-path honesty: the phase still says
+    // "reachable only on the async fault path, not play's synchronous effect".
     const play = document.endpoints.find((e) => e.key === 'Circuit.Sim.play')!;
     const kesWrite = play.writesState.find((w) => w.state === 'KernelErrorState');
     expect(kesWrite?.phase).toBe('errorSink');
-    // launchTickLoop lives in running.mutator.ts — it is a buffer transition +
-    // fire-and-forget launch with no symbol call, the Mutator definition
-    // verbatim, sitting next to play/pause (which delegate to it). The
-    // errorSink-phase KernelErrorState write is in its .catch.
-    expect(kesWrite?.site).toBe('src/circuit/sim/running.mutator.ts:51');
-    // play's own synchronous write (LoopState.phase) stays 'command' (not
-    // conflated). The LoopState recovery inside .catch (error→idle) is a
-    // separate write site to the same state, and that one is 'errorSink'.
+    // The write now lives in the named settleTickLoopFault Mutator (still a
+    // buffer transition calling no symbols, still in running.mutator.ts).
+    expect(kesWrite?.site).toBe('src/circuit/sim/running.mutator.ts:47');
+    // play's own synchronous write (LoopState.phase, via launchTickLoop) stays
+    // 'command'; the LoopState recovery reached through settleTickLoopFault's
+    // `.catch` delegation is a separate write site, correctly 'errorSink'.
     expect(play.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase).sort()).toEqual([
       'command',
       'errorSink',
