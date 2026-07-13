@@ -338,7 +338,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
   });
 
   it('declares its own current coverage ceiling honestly (not an aspirational value)', () => {
-    expect(document.meta.schemaVersion).toBe(8);
+    expect(document.meta.schemaVersion).toBe(9);
     // The honest current reach on the TS side — symbol-usage coverage stops at
     // the lower bound of explicit-symbolId stages + static call-site scanning
     // (not complete). It should flip to true only when coverage is actually
