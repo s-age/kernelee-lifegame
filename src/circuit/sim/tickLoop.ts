@@ -7,9 +7,8 @@
 // from SimState.granularity — a granularity switch takes effect from the next
 // lap as "runtime selection of the divert target".
 //
-// The launch rule (launchTickLoop) lives in running.mutator.ts — a Mutator that
-// calls no symbols, just a buffer transition + fire-and-forget launch, sharing
-// the LoopState.phase transition axis with play/pause.
+// The launch is a `.spawn` untracked fork branch in play.ts (play saga); the
+// detached branch play spawns is `tickLoopLauncherPipe` below.
 
 import { pipeline, type Kernel, type Pipe } from '@s-age/kernelee';
 import { LoopState, SimState, type ForkGranularity } from '../../contract/states';

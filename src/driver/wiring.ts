@@ -1,11 +1,12 @@
 // driver/wiring.ts — the wiring manifest. The single place where every device is wired.
 
-import { BufferBuilder, KernelBuilder, type Kernel, type PipeDescriptorEntry, type TraceSink } from '@s-age/kernelee';
+import { BufferBuilder, KernelBuilder, KernelErrorState, type Buffer, type Kernel, type PipeDescriptorEntry, type TraceSink } from '@s-age/kernelee';
 import { LifePort, SettingsPort, SettingsStorePort, SimFlowKeys, SimPort, type SettingsStoreDevice } from '../contract/ports';
 import { GridState, LoopState, SimState, StatsState, StrokeState } from '../contract/states';
 import { lifeDevice } from '../compute/device';
 import { settingsDevice } from '../circuit/settings';
 import { simDevice } from '../circuit/sim';
+import { TICK_LOOP_LAUNCH_NOTE } from '../circuit/sim/play';
 import { togglePipe } from '../circuit/sim/toggleCell';
 
 /**
@@ -60,6 +61,33 @@ export function bindFlows(builder: KernelBuilder): void {
 }
 
 /**
+ * The composition root's `onError` policy — the APP-DOMAIN half of tick-loop
+ * fault recovery. When `play`'s detached `.spawn` branch (the generation loop)
+ * faults, kernelee routes the failure here (a `.spawn`ed branch's error sink is
+ * the kernel's `onError`), tagged with the fork stage's note as `source`
+ * (`TICK_LOOP_LAUNCH_NOTE`). This replaces the framework default sink, so it
+ * must reproduce that sink's `KernelErrorState` write AND add the app recovery
+ * the framework can't own: reset `LoopState → idle` so the UI's Play control
+ * re-arms (the recovery half of the retired `settleTickLoopFault`).
+ *
+ * The LoopState reset is GATED on the loop's own source — a dispatched-command
+ * failure (a failed `setSpeed` save, say) also reaches this sink, and must not
+ * stop a running loop. `getBuffer` is a late-bound accessor for the kernel's
+ * built buffer (the sink is created before `build()` returns the kernel, but
+ * only ever CALLED at runtime, long after the buffer exists).
+ */
+export function loopFaultSink(getBuffer: () => Buffer): (source: string, error: unknown) => void {
+  return (source, error) => {
+    if (source === TICK_LOOP_LAUNCH_NOTE) {
+      getBuffer().mutate(LoopState, (loop) => (loop.phase === 'idle' ? loop : { phase: 'idle' as const }));
+    }
+    // Reproduce the framework default sink's write (an injected onError replaces it entirely).
+    const message = error instanceof Error ? error.message : String(error);
+    getBuffer().mutate(KernelErrorState, () => ({ message: `${source}: ${message}` }));
+  };
+}
+
+/**
  * Factory for the composition root: allocates state, wires every device, and
  * assembles the kernel. Tests use the same entry point (they run with the same
  * wiring as production).
@@ -91,6 +119,12 @@ export function makeKernel(
   bindFlows(builder);
   const boundSymbolIds = builder.boundSymbolIds;
   const flowCatalog = builder.flowCatalog;
-  const kernel = builder.build(devtools ? { buffer, tracing: true, onTrace: devtools.onTrace } : { buffer });
+  // `loopFaultSink` needs the built buffer, which `build()` produces from the
+  // `BufferBuilder` above; the sink closes over `() => kernel.buffer` (a const
+  // captured by the closure, only invoked at fault time — never during build).
+  const onError = loopFaultSink(() => kernel.buffer);
+  const kernel = builder.build(
+    devtools ? { buffer, tracing: true, onTrace: devtools.onTrace, onError } : { buffer, onError },
+  );
   return { kernel, boundSymbolIds, flowCatalog };
 }

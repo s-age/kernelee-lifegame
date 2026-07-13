@@ -7,6 +7,7 @@
 import { describePipe, type PipeDescriptorEntry } from '@s-age/kernelee';
 import { SettingsPort, SimPort } from '../contract/ports';
 import { DEFAULT_HEIGHT, DEFAULT_WIDTH } from '../contract/states';
+import { playPipe } from './sim/play';
 import { randomizePipe } from './sim/randomize';
 import { stepOncePipeFor } from './sim/stepOnce';
 import { strokeMovePipe, strokeStartPipe } from './sim/stroke';
@@ -18,12 +19,15 @@ import { setSpeedPipe } from './settings/setSpeed';
 import { hydratePipe } from './settings/hydrateSettings';
 
 /**
- * Covers all 9 of lifegame's root pipes (independent dispatch/kernel.run entry
+ * Covers all 10 of lifegame's root pipes (independent dispatch/kernel.run entry
  * points). Only the `tickLoop`/`stepOnce` keys go via `CircuitSimKeys` — they
- * are unbound pipes launched directly by `kernel.run`, so no corresponding
- * `KernelSymbol` exists. The other 7 reference the `KernelSymbol.id` of the
+ * are unbound pipes launched directly by divert/kernel.run, so no corresponding
+ * `KernelSymbol` exists. The other 8 reference the `KernelSymbol.id` of the
  * actually-bound `SimPort`/`SettingsPort` directly (no new hand-typed
- * constants — one more reference site never creates duplication).
+ * constants — one more reference site never creates duplication). `play` is now
+ * among them: since its launch became a `.spawn` untracked fork branch (play.ts),
+ * it is a catalogued saga endpoint whose spawn edge to `tickLoop` is what
+ * resolves that loop's former orphanEntry (see scripts/wiringIssueAllowlist.ts).
  *
  * Every entry stays a SOURCE-VISIBLE `describePipe(...)` call in this one
  * function — including toggleCell, which is also `flow()`-bound in
@@ -48,6 +52,12 @@ export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
       'Manual step (stepOnce)',
       stepOncePipeFor('chunk', DEFAULT_WIDTH, DEFAULT_HEIGHT),
       'Runs the same one generation as the loop body for a single lap, with no sleep/divert. Aborts at the entry gate unless LoopState.phase is idle (the invariant of never stepping while running).',
+    ),
+    describePipe(
+      SimPort.play.id,
+      'Play (play)',
+      playPipe,
+      'Arms the loop phase (double-start guard) then launches the generation loop as a detached .spawn untracked fork branch — the visible edge to tickLoop. A branch fault routes to the framework errorSink (onError policy resets LoopState to idle).',
     ),
     describePipe(
       SimPort.randomize.id,

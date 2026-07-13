@@ -3,8 +3,11 @@
 // Follows the saga / Switch / Emitter taxonomy.
 // The `+` of part files becomes a dot-suffix in TS (*.switch.ts / *.emitter.ts).
 //
-//   tickLoop.ts                saga: divert generation loop (the launch rule launchTickLoop lives in
-//                              running.mutator.ts)
+//   play.ts                    saga: arm the loop phase then .spawn the detached generation loop
+//                              (the detached-fork-branch launch; the visible edge to tickLoop)
+//   launchArm.switch.ts        Switch: the double-start guard (idle → launch fresh / else recover-only);
+//                              its LoopState write is a declared CI-floor exception (inseparable from the decision)
+//   tickLoop.ts                saga: divert generation loop (+ tickLoopLauncherPipe, play's .spawn branch)
 //   stepOnce.ts                saga: one gated lap
 //   toggleCell.ts              saga: cell-flip transition (the GridState write is the declared
 //                              CI-floor exception for transitions inseparable from the
@@ -19,8 +22,8 @@
 //   branches/                  fork branch pipes (per granularity: chunk / row / cell)
 //   stroke.ts                  saga: stroke interpretation (symbol call + divert)
 //   stroke.mutator.ts          Mutator: armStrokeState (strokeStart's entry) / strokeEnd
-//   running.mutator.ts         Mutator: play / pause / launchTickLoop (pure buffer transitions
-//                              that call no symbols + fire-and-forget launch)
+//   running.mutator.ts         Mutator: pause (a pure LoopState transition that calls no symbols;
+//                              play graduated to a saga when its launch became a .spawn)
 //   cache.ts                   pipe memoization (preserves the "self" of the divert)
 //   wiringKeys.ts               wiring catalog key constants shared by divertsTo/describePipe
 //   device.ts                  SimDevice catalog (mapping of port symbols to implementations, one-line delegates)

@@ -1,9 +1,15 @@
 // CircuitTests (headless) — verify the tick loop (divert) and the Sim operations by running the whole kernel.
 // No UI: driven solely by makeTestKernel (the same wiring as production) + calls via SimPort.
 
+import { BufferBuilder, KernelBuilder, KernelErrorState } from '@s-age/kernelee';
 import { describe, expect, it } from 'vitest';
-import { SettingsPort, SimPort } from '../src/contract/ports';
+import { LifePort, SettingsPort, SettingsStorePort, SimPort, type LifeDevice } from '../src/contract/ports';
 import { GridState, LoopState, SimState, StatsState, StrokeState, type ForkGranularity } from '../src/contract/states';
+import { lifeDevice } from '../src/compute/device';
+import { settingsDevice } from '../src/circuit/settings';
+import { simDevice } from '../src/circuit/sim';
+import { bindFlows, loopFaultSink } from '../src/driver/wiring';
+import { makeSettingsStore, memoryStorage } from '../src/infrastructure/settingsStore';
 import { makeTestKernel } from './testKernel';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -39,6 +45,72 @@ describe('Circuit.Sim.step', () => {
     await kernel.call(SimPort.step);
     await sleep(80);
     expect(kernel.buffer.read(GridState).generation).toBe(1);
+  });
+});
+
+describe('Circuit.Sim.play — detached loop fault recovery (the .spawn errorSink → onError policy)', () => {
+  /** A kernel wired exactly like production (makeKernel), but with a Compute
+   * device whose `stepIndexRange` THROWS — so `play`'s detached `.spawn`
+   * generation loop faults on its first lap. Its failure routes to the same
+   * `onError` policy production uses (`loopFaultSink`). */
+  function makeFaultyLoopKernel() {
+    const faultyLife: LifeDevice = {
+      ...lifeDevice,
+      stepIndexRange: () => {
+        throw new Error('stepIndexRange exploded');
+      },
+    };
+    const buffer = new BufferBuilder();
+    buffer.allocate(GridState);
+    buffer.allocate(SimState);
+    buffer.allocate(StatsState);
+    buffer.allocate(LoopState);
+    buffer.allocate(StrokeState);
+    const builder = new KernelBuilder();
+    LifePort.wire(faultyLife, builder);
+    SimPort.wire(simDevice, builder);
+    SettingsPort.wire(settingsDevice, builder);
+    SettingsStorePort.wire(makeSettingsStore(memoryStorage()), builder);
+    bindFlows(builder);
+    // eslint-disable-next-line prefer-const -- captured by the onError closure, only invoked at fault time
+    let kernel = builder.build({ buffer, onError: loopFaultSink(() => kernel.buffer) });
+    return kernel;
+  }
+
+  it('a loop fault recovers LoopState to idle AND surfaces on KernelErrorState (no manual .catch)', async () => {
+    const kernel = makeFaultyLoopKernel();
+    await kernel.call(SettingsPort.setSpeed, 200); // fast laps
+
+    // play arms 'running' and spawns the detached loop; the arm gate returns
+    // synchronously, so phase is 'running' immediately even though the loop
+    // will fault on its first generation.
+    await kernel.call(SimPort.play);
+    expect(kernel.buffer.read(LoopState).phase).toBe('running');
+
+    // The detached loop faults → the framework routes the branch failure to the
+    // injected onError (loopFaultSink), which resets LoopState→idle so the UI's
+    // Play control re-arms, AND writes KernelErrorState (surfacing the fault).
+    for (let i = 0; i < 500 && kernel.buffer.read(LoopState).phase !== 'idle'; i += 1) await sleep(1);
+    expect(kernel.buffer.read(LoopState).phase).toBe('idle'); // recovered — the OLD settleTickLoopFault behavior
+    expect(kernel.buffer.read(KernelErrorState).message).toContain('stepIndexRange exploded');
+
+    // And the loop is genuinely dead — no further generations.
+    const gen = kernel.buffer.read(GridState).generation;
+    await sleep(30);
+    expect(kernel.buffer.read(GridState).generation).toBe(gen);
+  });
+
+  it('a non-loop fault does NOT reset LoopState (the reset is gated on the loop source)', () => {
+    // Direct check of the onError policy's discriminator: an unrelated command
+    // failure must surface on KernelErrorState WITHOUT stopping a running loop.
+    const buffer = new BufferBuilder();
+    buffer.allocate(LoopState);
+    const built = buffer.build();
+    built.mutate(LoopState, () => ({ phase: 'running' as const }));
+    const sink = loopFaultSink(() => built);
+    sink('Circuit.Settings.setSpeed', new Error('disk full')); // a non-loop source
+    expect(built.read(LoopState).phase).toBe('running'); // loop untouched
+    expect(built.read(KernelErrorState).message).toContain('disk full'); // still surfaced
   });
 });
 

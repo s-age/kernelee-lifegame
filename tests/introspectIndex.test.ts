@@ -33,14 +33,20 @@ function partFiles(dir: string): string[] {
 }
 
 function allStages(stages: readonly StageEntry[]): StageEntry[] {
-  return stages.flatMap((stage) => [stage, ...stage.branches.flatMap(allStages)]);
+  return stages.flatMap((stage) => [
+    stage,
+    ...stage.branches.flatMap(allStages),
+    ...stage.untrackedBranches.flatMap(allStages),
+  ]);
 }
 
-/** The 4 `command`-kind endpoints — bound `portK` port members with no
+/** The 3 `command`-kind endpoints — bound `portK` port members with no
  * `describePipe`d `Pipe` behind them, so `stages: []`/`inputType: null` are
  * honest for these specifically, not the "forgot to write it" case the
- * 9-catalog-pipe floor below polices. */
-const COMMAND_KEYS = ['Circuit.Sim.play', 'Circuit.Sim.pause', 'Circuit.Sim.step', 'Circuit.Sim.strokeEnd'];
+ * 10-catalog-pipe floor below polices. (`play` graduated to a catalogued
+ * `'endpoint'` when its launch became a `.spawn` untracked fork branch — see
+ * play.ts / wiringCatalog.ts — so it is no longer a bare command.) */
+const COMMAND_KEYS = ['Circuit.Sim.pause', 'Circuit.Sim.step', 'Circuit.Sim.strokeEnd'];
 
 describe('runIntrospect against the real wiring catalog (index.json schema)', () => {
   let document: IndexDocument;
@@ -103,6 +109,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(byKey.get('Circuit.Sim.tickLoop')?.kind).toBe('divertTarget');
     expect(byKey.get('Circuit.Sim.stepOnce')?.kind).toBe('divertTarget');
     for (const key of [
+      'Circuit.Sim.play', // now a catalogued saga endpoint (its launch became a .spawn)
       'Circuit.Sim.randomize',
       'Circuit.Sim.toggleCell',
       'Circuit.Sim.strokeStart',
@@ -113,29 +120,32 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     ]) {
       expect(byKey.get(key)?.kind, key).toBe('endpoint');
     }
-    // play/pause/step/strokeEnd: bound portK members with no describePipe entry —
+    // pause/step/strokeEnd: bound portK members with no describePipe entry —
     // a THIRD kind, neither 'endpoint' (needs a catalogued Pipe) nor 'divertTarget'.
     for (const key of COMMAND_KEYS) {
       expect(byKey.get(key)?.kind, key).toBe('command');
     }
   });
 
-  it('tickLoop/stepOnce — the orphan-by-launch entries — carry a real drive→launch edge', () => {
-    // Their OWN kind is divertTarget (still not bound directly — divert/
-    // kernel.run launch is a different causal channel than dispatch), but each
-    // carries a real, statically-recovered launch edge with mode 'run', so they
-    // are not undrivable orphans from the graph's own perspective.
-    for (const key of ['Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce']) {
-      const endpoint = document.endpoints.find((e) => e.key === key)!;
-      expect(endpoint.kind, key).toBe('divertTarget');
-      expect(endpoint.drivenBy.length, key).toBeGreaterThan(0);
-      expect(endpoint.drivenBy.every((d) => d.mode === 'run'), key).toBe(true);
-    }
-    // play launches tickLoop (through launchTickLoop, one helper hop); step
-    // launches stepOnce directly (stepOnce.ts IS the command's own impl).
+  it('tickLoop is reached by play\'s .spawn divert edge (not a run launch); stepOnce keeps its run launch', () => {
     const tickLoop = document.endpoints.find((e) => e.key === 'Circuit.Sim.tickLoop')!;
     const stepOnce = document.endpoints.find((e) => e.key === 'Circuit.Sim.stepOnce')!;
-    expect(tickLoop.drivenBy.some((d) => d.owner === 'launchTickLoop')).toBe(true);
+
+    // tickLoop: divertTarget, now reached by play's detached `.spawn` launcher,
+    // which raw-diverts into the size-specific loop. So its incoming edge is a
+    // DIVERT edge (divertedFrom includes the external referrer 'Circuit.Sim.play')
+    // — NOT a `kernel.run` launch anymore (the old launchTickLoop is gone). That
+    // external referrer is exactly what resolves its former orphanEntry.
+    expect(tickLoop.kind).toBe('divertTarget');
+    expect(tickLoop.divertedFrom).toContain('Circuit.Sim.play');
+    expect(tickLoop.drivenBy.every((d) => d.mode !== 'run')).toBe(true); // no run-launch edge remains
+
+    // stepOnce: still launched directly via `kernel.run` (step's own delegate
+    // awaits it), so it keeps its statically-recovered run edge — and, with no
+    // external divertsTo referrer anywhere, it stays a permanent orphanEntry.
+    expect(stepOnce.kind).toBe('divertTarget');
+    expect(stepOnce.drivenBy.length).toBeGreaterThan(0);
+    expect(stepOnce.drivenBy.every((d) => d.mode === 'run')).toBe(true);
     expect(stepOnce.drivenBy.some((d) => d.owner === 'stepOnce')).toBe(true);
   });
 
@@ -234,7 +244,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(declared.has('KernelErrorState')).toBe(true);
   });
 
-  it('KernelErrorState is tokenized: declaration (null + report) / write (errorSink phase, in the named fault Mutator) / read (useKernelError)', () => {
+  it('KernelErrorState is tokenized: declaration (null + report) / read (useKernelError) / write now a composition-root onError policy (unscanned)', () => {
     // Declaration: framework-injected (from kernelee's buffer.ts build()), so
     // there is no defineState site inside the app → declaration: null, plus an
     // explicit stateDeclaration unresolved so the "why null" is not silent.
@@ -247,34 +257,21 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // Read: ErrorBanner's useKernelError() shows up in readBy (a separate hook from useBuffer).
     expect(kes.readBy.map((r) => r.site)).toEqual(['src/presentation/ErrorBanner.tsx:10']);
 
-    // Write: the fault cleanup that used to live INLINE in launchTickLoop's
-    // `.catch` is now the named Mutator `settleTickLoopFault` (card 6215B789),
-    // so the KernelErrorState write has a name + address + graph identity — AND
-    // keeps its honest 'errorSink' phase (card 4BA4A40B).
-    //
-    // The write's mutate node no longer sits lexically inside the `.catch`
-    // arrow (it moved into a top-level function), so the scanner's lexical
-    // `commandAccessPhaseOf` alone would recompute it as 'command'. But
-    // `collectCommandFacts` threads the CALL-SITE phase across the
-    // `.catch(err => settleTickLoopFault(kernel, err))` delegation it already
-    // follows for write ATTRIBUTION — so a write reached (transitively) from a
-    // `.catch` call site stays 'errorSink' wherever its body lives. The
-    // extraction is thus fully visible (named Mutator + running.mutator.ts
-    // site) WITHOUT downgrading the fault-path honesty: the phase still says
-    // "reachable only on the async fault path, not play's synchronous effect".
-    const play = document.endpoints.find((e) => e.key === 'Circuit.Sim.play')!;
-    const kesWrite = play.writesState.find((w) => w.state === 'KernelErrorState');
-    expect(kesWrite?.phase).toBe('errorSink');
-    // The write now lives in the named settleTickLoopFault Mutator (still a
-    // buffer transition calling no symbols, still in running.mutator.ts).
-    expect(kesWrite?.site).toBe('src/circuit/sim/running.mutator.ts:47');
-    // play's own synchronous write (LoopState.phase, via launchTickLoop) stays
-    // 'command'; the LoopState recovery reached through settleTickLoopFault's
-    // `.catch` delegation is a separate write site, correctly 'errorSink'.
-    expect(play.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase).sort()).toEqual([
-      'command',
-      'errorSink',
-    ]);
+    // Write: THE ARCHITECTURAL WIN of the detached-fork migration (card 4/4).
+    // The KernelErrorState write used to be app-pipe code — the hand-rolled
+    // `settleTickLoopFault` Mutator that `play`'s `void kernel.run(...).catch()`
+    // delegated to. Now that `play` launches the loop as a `.spawn` untracked
+    // fork branch, a branch fault routes to the framework errorSink, and the
+    // KernelErrorState write moved OUT of any pipe/command into the composition
+    // root's `onError` policy (driver/wiring.ts's `loopFaultSink`). That is
+    // framework-boundary infrastructure, not a catalogued pipe or command
+    // handler, so the static scan attributes it to no endpoint — the app no
+    // longer writes KernelErrorState from its own wiring graph at all.
+    const kesWrites = document.endpoints.flatMap((e) =>
+      e.writesState.filter((w) => w.state === 'KernelErrorState').map((w) => ({ key: e.key, ...w })),
+    );
+    expect(kesWrites).toEqual([]); // no endpoint writes KernelErrorState anymore
+    expect(kes.writtenBy).toEqual([]); // and no presentation write either
   });
 
   it('representative state-graph values hold: GridState/StatsState writers and presentation readers', () => {
@@ -283,18 +280,30 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // not directly under the endpoint's scope, but the static scan's helper
     // following picks it up. The same 4 also match diffStats.usedByStagesOf
     // (the shared-symbol test below).
+    //
+    // `play` now ALSO appears — a consequence of the detached-fork migration
+    // (card 4/4). Its `.spawn` launcher (a closure reused from granularitySwitch)
+    // raw-diverts into `tickLoopPipeFor`, and the scan's helper-following walks
+    // that factory into the loop's own `appendGeneration` effect — the SAME
+    // helper-following that gives tickLoop its writes, now reaching play through
+    // its first-class launch stage (unlike the old `void kernel.run(...)` launch,
+    // which the command scan skip-boundaried). So play is a TRANSITIVE board
+    // writer: pressing Play does cause the board to evolve. This is honest
+    // richer attribution, not a hole. (A scanner skip-boundary for `.spawn`, à
+    // la `kernel.run`, would trim it — a kernelee-mcp-tools concern, out of
+    // this card's scope.)
     const gridWriters = new Set(
       document.endpoints.filter((e) => e.writesState.some((w) => w.state === 'GridState')).map((e) => e.key),
     );
     expect(gridWriters).toEqual(
-      new Set(['Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce', 'Circuit.Sim.randomize', 'Circuit.Sim.toggleCell']),
+      new Set(['Circuit.Sim.play', 'Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce', 'Circuit.Sim.randomize', 'Circuit.Sim.toggleCell']),
     );
 
     const statsWriters = new Set(
       document.endpoints.filter((e) => e.writesState.some((w) => w.state === 'StatsState')).map((e) => e.key),
     );
     expect(statsWriters).toEqual(
-      new Set(['Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce', 'Circuit.Sim.randomize', 'Circuit.Sim.toggleCell']),
+      new Set(['Circuit.Sim.play', 'Circuit.Sim.tickLoop', 'Circuit.Sim.stepOnce', 'Circuit.Sim.randomize', 'Circuit.Sim.toggleCell']),
     );
 
     // That write lives in appendGeneration's `.effect`, so the phase is 'effect'.
@@ -411,7 +420,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     const sleep = effects.find((s) => s.handler!.functionName === 'sleepForSpeed')!;
     expect(sleep.handler!.functionName).toBe('sleepForSpeed');
     // site is where the body lives (the grep target), not the wiring site.
-    expect(sleep.handler!.site).toBe('src/circuit/sim/tickLoop.ts:27');
+    expect(sleep.handler!.site).toBe('src/circuit/sim/tickLoop.ts:26');
     const commit = effects.find((s) => s.handler!.functionName === 'applyGenerationResult')!;
     expect(commit.handler!.site).toBe('src/circuit/sim/generation.mutator.ts:30');
 
@@ -425,9 +434,12 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // tickLoop/stepOnce share appendGeneration. Entry-position bare identifiers
     // (`pipeline(meta, fn)`) are detected the same as chain-link arguments —
     // runningPhaseGate / idlePhaseGate / granularityGateAndPayload /
-    // inStrokeGate / armStrokeState all have addresses. The Mutator-part
-    // extraction contributes the apply* family (buffer-transition tail effects
-    // that call no symbols) as named handlers too.
+    // inStrokeGate / armStrokeState / launchArmGate all have addresses. The
+    // Mutator-part extraction contributes the apply* family (buffer-transition
+    // tail effects that call no symbols) as named handlers too. `allStages`
+    // recurses untracked branches, so play's `.spawn` launcher contributes a
+    // SECOND `granularitySwitch` (the loop's self-divert re-arm is the first),
+    // and `launchArmGate` (play's double-start guard entry) appears.
     const named = document.endpoints.flatMap((e) => allStages(e.stages)).filter((s) => s.handler !== null);
     expect(named.map((s) => s.handler!.functionName).sort()).toEqual([
       'applyGenerationResult',
@@ -442,8 +454,10 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       'cellVisitGate',
       'granularityGateAndPayload',
       'granularitySwitch',
+      'granularitySwitch',
       'idlePhaseGate',
       'inStrokeGate',
+      'launchArmGate',
       'loadedSettingsGate',
       'mergeGranularityBranches',
       'mergeGranularityBranches',
@@ -638,13 +652,18 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(offBuffer).toEqual([]);
   });
 
-  it('accounts for every unresolved entry: exactly the known 4 (stateDeclaration + namedMutationVia + wiring-graph 2)', () => {
-    // A record of the current reach. The remaining 4 are each either a
+  it('accounts for every unresolved entry: exactly the known 3 (stateDeclaration + namedMutationVia + one orphanEntry)', () => {
+    // A record of the current reach. The remaining 3 are each either a
     // detection success or a deliberate scan-scope boundary:
     //   stateDeclaration  — KernelErrorState lives in kernelee core (outside the scan root)
     //   namedMutationVia  — contract states have 0 methods (soft-null; the writes themselves are indexed)
-    //   orphanEntry ×2    — tickLoop/stepOnce are kernel.run-launched + self-divert only
-    //                       (inherent to the launch path; permanent even with a complete catalog)
+    //   orphanEntry ×1    — stepOnce only: kernel.run-launched with no external divertsTo referrer
+    //                       (inherent to its launch path; permanent even with a complete catalog).
+    // tickLoop is NO LONGER an orphan (dropped from 2 → 1): the detached-fork
+    // migration (card 4/4) made `play` launch it through a `.spawn` untracked
+    // branch whose launcher declares `divertsTo: [tickLoop]`, giving the loop a
+    // real EXTERNAL referrer (`Circuit.Sim.play`). The orphan check is
+    // unchanged; the topology genuinely gained an edge.
     // If this number grows, look at the kind breakdown in the diff first — a
     // total alone cannot reveal offsetting changes.
     const unresolved = document.unresolved ?? [];
@@ -653,9 +672,9 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(Object.fromEntries(byKind)).toEqual({
       stateDeclaration: 1,
       namedMutationVia: 1,
-      orphanEntry: 2,
+      orphanEntry: 1,
     });
-    expect(unresolved).toHaveLength(4);
+    expect(unresolved).toHaveLength(3);
   });
 
   it('every pipe(closure) stage always carries a note — the gate/assembly family has no other identity (CI floor)', () => {
@@ -713,7 +732,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     }
   });
 
-  it('parts: all 15 part files (switch 7 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
+  it('parts: all 16 part files (switch 8 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
     // The test above (the handler.site reference floor) is "prevention of dead
     // part files" seen from the filesystem side. This one is the index itself
     // producing the parts section — the subgraph-as-nodes answer to "can this
@@ -722,15 +741,18 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // bless regressions — an expectation-lowering diff is the strongest
     // regression signal).
     //
-    // The 6 mutators: running / generation / randomize / toggleCell / stroke /
-    // simState. The bridge kind exists as a slot but lifegame has 0 (the slot
-    // existing is itself meaningful — see arch-circuit.md), so it does not
-    // appear in byKind.
+    // The 8 switches: granularity / runningPhase / idlePhase / inStroke /
+    // cellVisit / knownGranularity / loadedSettings / launchArm — the last new
+    // in card 4/4 (play's double-start guard, extracted when play became a
+    // saga). The 6 mutators: running (now pause only) / generation / randomize /
+    // toggleCell / stroke / simState. The bridge kind exists as a slot but
+    // lifegame has 0 (the slot existing is itself meaningful — see
+    // arch-circuit.md), so it does not appear in byKind.
     const parts = document.parts ?? [];
     const byKind = new Map<string, number>();
     for (const part of parts) byKind.set(part.kind, (byKind.get(part.kind) ?? 0) + 1);
-    expect(Object.fromEntries(byKind)).toEqual({ switch: 7, emitter: 2, mutator: 6 });
-    expect(parts).toHaveLength(15);
+    expect(Object.fromEntries(byKind)).toEqual({ switch: 8, emitter: 2, mutator: 6 });
+    expect(parts).toHaveLength(16);
     expect(parts.filter((p) => p.kind === 'bridge')).toEqual([]);
 
     // usedBy is non-empty for every part (empty would raise a partUsage
@@ -750,10 +772,11 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(byId.get('cellVisit.switch')?.usedBy).toEqual(['Circuit.Sim.strokeMove', 'Circuit.Sim.strokeStart']);
     // A mutator's usedBy is the UNION of StageEntry.handler.site (chain-link /
     // entry bare identifiers) and command endpoints' declaration sites
-    // (assembly.ts) — either path counts regardless of kind. running goes via
-    // command (play/pause; the Mutator calls no symbols and is not a stage —
-    // per running.mutator.ts's own doc).
-    expect(byId.get('running.mutator')?.usedBy).toEqual(['Circuit.Sim.pause', 'Circuit.Sim.play']);
+    // (assembly.ts) — either path counts regardless of kind. running now holds
+    // only `pause` (a command endpoint's declaration site); `play` graduated to
+    // a saga when its launch became a `.spawn`, so it no longer references this
+    // Mutator.
+    expect(byId.get('running.mutator')?.usedBy).toEqual(['Circuit.Sim.pause']);
     // The generation/randomize/toggleCell mutators go via handler.site
     // (bare identifiers of chain-link `.effect(...)`).
     expect(byId.get('generation.mutator')?.usedBy).toEqual(['Circuit.Sim.stepOnce', 'Circuit.Sim.tickLoop']);
@@ -771,10 +794,17 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       'Circuit.Settings.setGranularity',
       'Circuit.Settings.setSpeed',
     ]);
+    // granularity.switch is now shared: the loop's self-divert re-arm
+    // (tickLoop) AND play's `.spawn` launcher both reuse it (the same "read
+    // granularity+board-size → divert into tickLoopPipeFor" hop).
+    expect(byId.get('granularity.switch')?.usedBy).toEqual(['Circuit.Sim.play', 'Circuit.Sim.tickLoop']);
+    // launchArm.switch: play's double-start guard (new in card 4/4).
+    expect(byId.get('launchArm.switch')?.usedBy).toEqual(['Circuit.Sim.play']);
     // Singly-used parts are indexed too (unlike sharedStages, parts have no shared-count cutoff).
-    expect(byId.get('granularity.switch')?.usedBy).toEqual(['Circuit.Sim.tickLoop']);
     expect(byId.get('idlePhase.switch')?.usedBy).toEqual(['Circuit.Sim.stepOnce']);
     expect(byId.get('inStroke.switch')?.usedBy).toEqual(['Circuit.Sim.strokeMove']);
+    // runningPhase.switch stays tickLoop-only: it is the LOOP's own entry gate,
+    // reached from play only by divert (not in play's spawn stage tree).
     expect(byId.get('runningPhase.switch')?.usedBy).toEqual(['Circuit.Sim.tickLoop']);
     expect(byId.get('randomize.emitter')?.usedBy).toEqual(['Circuit.Sim.randomize']);
     expect(byId.get('knownGranularity.switch')?.usedBy).toEqual(['Circuit.Settings.setGranularity']);
@@ -792,7 +822,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
    * test goes RED by default. Two ways back to GREEN: (a) extract the write
    * into `*.mutator.ts` (the default answer), or (b) if it is genuinely
    * inseparable, declare the reason in that file's own doc comment and append
-   * it to this allowlist (currently 3 entries).
+   * it to this allowlist (currently 4 entries).
    */
   const WRITES_STATE_MUTATOR_ALLOWLIST: ReadonlyArray<{ readonly file: string; readonly reason: string }> = [
     {
@@ -801,6 +831,13 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         'The aborting branch carries the write that settles LoopState on idle, inseparably from the decision ' +
         '(no stage follows, so there is nowhere to extract the write to) — declared in ' +
         "runningPhase.switch.ts's own doc comment.",
+    },
+    {
+      file: 'src/circuit/sim/launchArm.switch.ts',
+      reason:
+        "play's double-start guard: `wasIdle` must be read and the LoopState phase applied (→running) atomically " +
+        '(no await between) or a re-entrant play could double-launch the loop — the write is inseparable from the ' +
+        "launch/recover decision, the same exception shape as runningPhase.switch.ts. Declared in launchArm.switch.ts's own doc comment.",
     },
     {
       file: 'src/circuit/sim/cellVisit.switch.ts',
