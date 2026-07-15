@@ -1,7 +1,7 @@
 {
   "name": "kernelee-lifegame",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A kernelee showcase: Conway's Game of Life — demoing divert (generation loop) and fork (row-chunk parallel computation)",
   "type": "module",
   "scripts": {
@@ -11,17 +11,18 @@
     "preview": "vite preview",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "devtools": "kernelee-devtools-bridge --index .claude/introspect/index.json --panel-config scripts/devtools-panel.config.json"
+    "devtools": "kernelee-devtools-bridge --index .claude/introspect/index.json --panel-config scripts/devtools-panel.config.json",
+    "trace:dump": "tsx tests/traceDump.harness.ts"
   },
   "dependencies": {
-    "@s-age/kernelee": "^0.2.0",
-    "@s-age/kernelee-devtools-bridge": "^0.2.0",
-    "@s-age/react-kernelee": "^0.1.0",
+    "@s-age/kernelee": "file:../kernelee",
+    "@s-age/kernelee-devtools-bridge": "file:../kernelee-devtools-bridge",
+    "@s-age/react-kernelee": "^0.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@s-age/kernelee-mcp-tools": "^0.2.0",
+    "@s-age/kernelee-mcp-tools": "file:../kernelee-mcp-tools",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.12",

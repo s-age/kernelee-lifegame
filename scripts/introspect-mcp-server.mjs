@@ -36,6 +36,11 @@ const defaults = {
   repoRoot,
   refreshCommand: 'npm run introspect',
   refreshTimeoutSeconds: 300,
+  // arch_monitor's data source: the rolling TraceState dump the devtools bridge
+  // persists from the live session (bridge `--trace-out`, default). Overridable
+  // via KERNEL_INTROSPECT_TRACE_PATH. Unset → arch_monitor reports it cleanly
+  // and the other five tools are unaffected.
+  tracePath: '/tmp/kernelee-trace.json',
 };
 
 await runKernelIntrospectMCPServer(configurationFromEnvironmentOverridingDefaults(defaults));

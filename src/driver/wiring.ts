@@ -92,20 +92,34 @@ export function loopFaultSink(getBuffer: () => Buffer): (source: string, error: 
  * assembles the kernel. Tests use the same entry point (they run with the same
  * wiring as production).
  *
- * `devtools` is an opt-in solely for the kernelee-devtools-bridge connection
- * (default undefined → tracing stays at its default of false, preserving the
- * "single master switch" design). `boundSymbolIds` is included in the return
- * value so `KernelBuilder.boundSymbolIds` (which only exists before build),
- * needed for the `projectWiringGraph` call, can be carried back to the caller
- * (the composition root) without wiring twice. `flowCatalog` rides along for
- * the same reason: it is the flow-binding table's own derived catalog
- * (kernelee guarantees a `flow()`-bound pipe cannot be wired without being
- * catalogued), which `mergeWiringCatalog` (circuit/wiringCatalog.ts) folds
- * into the projected catalog at the consumers.
+ * `trace` is the single master tracing switch (default undefined → tracing
+ * stays at its default of false, preserving the "single master switch"
+ * design). Passing it at all turns tracing on; its one field discriminates
+ * WHICH sink records the trace — the two are mutually exclusive, mirroring
+ * `KernelBuildOptions.onTrace`'s own "an injected sink replaces the default
+ * entirely" rule:
+ *   - `{ onTrace }` — the kernelee-devtools-bridge shape (main.tsx's only
+ *     caller today): a custom sink forwards every traced call to the bridge's
+ *     WS connection LIVE. This REPLACES the default sink, so the runtime
+ *     `TraceState` buffer cell is never written on this path.
+ *   - `{}` (onTrace omitted) — tracing on with the framework's DEFAULT sink,
+ *     so `TraceState` IS populated. This is the path the headless
+ *     trace-dump harness (tests/traceDump.harness.ts) uses: a one-shot dump
+ *     has no live WS to forward to, and wants exactly the buffer-resident ring
+ *     `kernel.buffer.read(TraceState)` exposes.
+ *
+ * `boundSymbolIds` is included in the return value so
+ * `KernelBuilder.boundSymbolIds` (which only exists before build), needed for
+ * the `projectWiringGraph` call, can be carried back to the caller (the
+ * composition root) without wiring twice. `flowCatalog` rides along for the
+ * same reason: it is the flow-binding table's own derived catalog (kernelee
+ * guarantees a `flow()`-bound pipe cannot be wired without being catalogued),
+ * which `mergeWiringCatalog` (circuit/wiringCatalog.ts) folds into the
+ * projected catalog at the consumers.
  */
 export function makeKernel(
   infra: InfrastructureDevices,
-  devtools?: { onTrace: TraceSink },
+  trace?: { onTrace?: TraceSink },
 ): { kernel: Kernel; boundSymbolIds: ReadonlySet<string>; flowCatalog: readonly PipeDescriptorEntry[] } {
   const buffer = new BufferBuilder();
   buffer.allocate(GridState);
@@ -123,8 +137,12 @@ export function makeKernel(
   // `BufferBuilder` above; the sink closes over `() => kernel.buffer` (a const
   // captured by the closure, only invoked at fault time — never during build).
   const onError = loopFaultSink(() => kernel.buffer);
+  // `trace.onTrace` being omitted (`undefined`) is passed straight through:
+  // `KernelBuilder.build` falls back to its own default sink whenever
+  // `options.onTrace` is `undefined` but `tracing` is `true` — there is no
+  // need to branch on it here, only on `trace` itself (tracing on vs off).
   const kernel = builder.build(
-    devtools ? { buffer, tracing: true, onTrace: devtools.onTrace, onError } : { buffer, onError },
+    trace ? { buffer, tracing: true, onTrace: trace.onTrace, onError } : { buffer, onError },
   );
   return { kernel, boundSymbolIds, flowCatalog };
 }

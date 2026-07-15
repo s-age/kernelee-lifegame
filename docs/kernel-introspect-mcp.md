@@ -66,7 +66,7 @@ show the registration state itself).
 ```sh
 cd kernelee-lifegame
 gemini mcp add kernel-introspect node scripts/introspect-mcp-server.mjs -s project \
-  --description "kernelee-lifegame architecture index (arch_overview/arch_endpoint/arch_state/arch_trace/arch_refresh)"
+  --description "kernelee-lifegame architecture index (arch_overview/arch_endpoint/arch_state/arch_walk/arch_refresh)"
 ```
 **Note**: due to Gemini CLI's own folder-trust mechanism, the first time you
 must launch `gemini` in that directory and answer the "do you trust this
@@ -83,7 +83,7 @@ shows "configured but disabled because this folder is untrusted".
       "args": [
         "/absolute/path/kernelee-lifegame/scripts/introspect-mcp-server.mjs"
       ],
-      "description": "kernelee-lifegame architecture index (arch_overview/arch_endpoint/arch_state/arch_trace/arch_refresh)"
+      "description": "kernelee-lifegame architecture index (arch_overview/arch_endpoint/arch_state/arch_walk/arch_refresh)"
     }
   }
 }
@@ -169,7 +169,7 @@ keys:
 }
 ```
 
-### `arch_trace` — arguments: `from` (endpoint/symbol/state/sharedStage), `edges?`, `depth?` (default 1)
+### `arch_walk` — arguments: `from` (endpoint/symbol/state/sharedStage), `edges?`, `depth?` (default 1)
 
 Expands typed edges (`drivenBy`/`divertsTo`/`callsSymbol`/`reads`/`writes`/
 `usesSharedStage`) from `from` up to the given depth. `edges` is a
@@ -177,7 +177,7 @@ direction-agnostic filter (e.g. from a state, `edges: ["writes"]` lists the
 endpoints that write that state).
 
 ```json
-// arch_trace({ from: "Circuit.Sim.randomize", depth: 1 })
+// arch_walk({ from: "Circuit.Sim.randomize", depth: 1 })
 {
   "staleness": "fresh",
   "from": { "kind": "endpoint", "id": "Circuit.Sim.randomize" },
