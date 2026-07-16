@@ -15,7 +15,7 @@ import { LoopState, SimState, type ForkGranularity } from '../../contract/states
 import { cachedPipe } from './cache';
 import { appendGeneration } from './generation';
 import { granularitySwitch } from './granularity.switch';
-import { runningPhaseGate } from './runningPhase.switch';
+import { runningPhaseSwitch } from './runningPhase.switch';
 import { CircuitSimKeys } from './wiringKeys';
 
 /**
@@ -37,10 +37,10 @@ async function sleepForSpeed(kernel: Kernel): Promise<void> {
 const tickLoopPipes = new Map<string, Pipe<void, void>>();
 
 /**
- * The generation loop body. gate → one generation → sleep → granularitySwitch
+ * The generation loop body. switch → one generation → sleep → granularitySwitch
  * (divert to the next lap).
  *
- * The entry gate is a Switch part (runningPhase.switch.ts). The final stage is
+ * The entry switch is a Switch part (runningPhase.switch.ts). The final stage is
  * also a Switch part (granularity.switch.ts) — it reads SimState.granularity
  * and diverts to the corresponding loop pipe. The divert target is decided at
  * runtime (StageDescriptor.divertsTo is the author's declaration of the
@@ -55,8 +55,8 @@ export function tickLoopPipeFor(
   return cachedPipe(tickLoopPipes, granularity, width, height, () =>
     appendGeneration(
       pipeline(
-        { note: 'Phase gate (abort unless running = natural stop, settling the phase on idle)' },
-        runningPhaseGate,
+        { note: 'Phase switch (abort unless running = natural stop, settling the phase on idle)' },
+        runningPhaseSwitch,
       ),
       granularity,
       width,

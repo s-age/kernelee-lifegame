@@ -232,12 +232,14 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         key,
       ).toBe(false);
     }
-    // stateDeclaration (from KernelErrorState) is outside the wiring-graph
-    // vocabulary and thus outside failOnWiringIssues, but confirm it is
-    // explicitly reported rather than silent (not a dangling reference).
+    // schema v12: KernelErrorState is origin:'framework', so its
+    // declaration:null is the expected shape, not a stateDeclaration
+    // unresolved miss — confirm it is NOT reported (not "outside the
+    // wiring-graph vocabulary" the way it used to be described here; it is
+    // no longer in `unresolved` at all).
     expect(
       unresolved.some((u) => u.kind === 'stateDeclaration' && u.detail.includes('"KernelErrorState"')),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('no dangling state reference: every readsState/writesState state name exists in states[]', () => {
@@ -252,15 +254,19 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(declared.has('KernelErrorState')).toBe(true);
   });
 
-  it('KernelErrorState is tokenized: declaration (null + report) / read (useKernelError) / write now a composition-root onError policy (unscanned)', () => {
+  it('KernelErrorState is tokenized: origin:framework + declaration:null (not unresolved) / read (useKernelError) / write now a composition-root onError policy (unscanned)', () => {
     // Declaration: framework-injected (from kernelee's buffer.ts build()), so
-    // there is no defineState site inside the app → declaration: null, plus an
-    // explicit stateDeclaration unresolved so the "why null" is not silent.
+    // there is no defineState site inside the app → declaration: null. Schema
+    // v12: origin:'framework' makes this the EXPECTED shape for a
+    // framework-allocated state, not an unresolved miss — the "declaration
+    // null ⟹ also in unresolved" pact now applies only to origin:'app' cells,
+    // so it is NOT listed in unresolved.
     const kes = (document.states ?? []).find((s) => s.name === 'KernelErrorState')!;
     expect(kes.declaration).toBeNull();
+    expect(kes.origin).toBe('framework');
     expect(
       (document.unresolved ?? []).some((u) => u.kind === 'stateDeclaration' && u.detail.includes('"KernelErrorState"')),
-    ).toBe(true);
+    ).toBe(false);
 
     // Read: ErrorBanner's useKernelError() shows up in readBy (a separate hook from useBuffer).
     expect(kes.readBy.map((r) => r.site)).toEqual(['src/presentation/ErrorBanner.tsx:10']);
@@ -350,14 +356,18 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // tickLoopPipeFor → appendGeneration effect), which is fire-and-forget and
     // OUTLIVES play — not play's own synchronous effect. The scanner phases them
     // 'detached' (the honest WHEN, the same axis 'errorSink' adds for faults),
-    // not 'effect'. play's OWN synchronous write (launchArmGate's LoopState
-    // arm) stays 'stage' — only the untracked subtree flips.
+    // not 'effect'. launchArmGate's own LoopState arm write is NO LONGER an
+    // endpoint-level writesState entry at all (schemaVersion 11, the gate
+    // migration): a gate runs before `Circuit.Sim.play`'s handler is even
+    // invoked, so it has no stage-tree presence — its write surfaces instead
+    // via `document.gates[].writesState` (phase 'gate'), verified in its own
+    // test below. Only the untracked subtree's runningPhaseSwitch write remains
+    // here.
     const play = document.endpoints.find((e) => e.key === 'Circuit.Sim.play')!;
     expect(play.writesState.find((w) => w.state === 'GridState')?.phase).toBe('detached');
     expect(play.writesState.find((w) => w.state === 'StatsState')?.phase).toBe('detached');
-    expect(play.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase).sort()).toEqual([
-      'detached', // the loop's runningPhaseGate write, reached through the branch
-      'stage', // launchArmGate's own synchronous arm write
+    expect(play.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase)).toEqual([
+      'detached', // the loop's runningPhaseSwitch write, reached through the branch
     ]);
 
     const states = document.states ?? [];
@@ -380,6 +390,69 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(byName.get('StrokeState')?.readBy).toEqual([]);
   });
 
+  it('gates: the 4 pre-handler vetoes migrated to declareGate/KernelBuilder.guard are indexed (schemaVersion 11)', () => {
+    // The interceptor/gate migration: 4 pipe-entry Switch parts became
+    // framework gates, each guarding exactly one port symbol. `gates` and
+    // `guardEdges` are the static-scan-only halves of the schema (v11) — no
+    // runtime kernel needed to read "what guards what".
+    const gates = document.gates ?? [];
+    expect(gates).toHaveLength(4);
+    const byId = new Map(gates.map((g) => [g.id, g]));
+
+    const launchArm = byId.get('guard:loop.launchArm')!;
+    expect(launchArm.declarationSite).toBe('src/circuit/sim/launchArm.gate.ts:60');
+    expect(launchArm.handler).toEqual({
+      functionName: 'launchArmGate',
+      site: 'src/circuit/sim/launchArm.gate.ts:49',
+    });
+    expect(launchArm.guardedTargets).toEqual(['Circuit.Sim.play']);
+    expect(launchArm.readsState.map((r) => r.state)).toEqual(['LoopState']);
+    // The double-start guard's LoopState arm write — the CI-floor exception
+    // (WRITES_STATE_MUTATOR_ALLOWLIST below) — now surfaces HERE, phased
+    // 'gate', not on any endpoint's writesState (see the play writesState
+    // test above): moving out of the stage tree must not make the write
+    // invisible to the completeness net.
+    expect(launchArm.writesState.map((w) => ({ state: w.state, phase: w.phase }))).toEqual([
+      { state: 'LoopState', phase: 'gate' },
+    ]);
+
+    const idlePhase = byId.get('guard:loop.idle')!;
+    expect(idlePhase.handler?.functionName).toBe('idlePhaseGate');
+    expect(idlePhase.guardedTargets).toEqual(['Circuit.Sim.step']);
+    expect(idlePhase.readsState.map((r) => r.state)).toEqual(['LoopState']);
+    expect(idlePhase.writesState).toEqual([]); // pure selects-only, no exception needed
+
+    const inStroke = byId.get('guard:stroke.active')!;
+    expect(inStroke.handler?.functionName).toBe('inStrokeGate');
+    expect(inStroke.guardedTargets).toEqual(['Circuit.Sim.strokeMove']);
+    expect(inStroke.readsState.map((r) => r.state)).toEqual(['StrokeState']);
+    expect(inStroke.writesState).toEqual([]);
+
+    const knownGranularity = byId.get('guard:settings.knownGranularity')!;
+    expect(knownGranularity.handler?.functionName).toBe('knownGranularityGate');
+    expect(knownGranularity.guardedTargets).toEqual(['Circuit.Settings.setGranularity']);
+    // The payload-assembly half moved to setGranularityPipe's own new entry
+    // stage (a gate's next(v) value is discarded — declareGate's own doc
+    // comment) — this gate reads nothing, unlike the old cohabiting Switch.
+    expect(knownGranularity.readsState).toEqual([]);
+    expect(knownGranularity.writesState).toEqual([]);
+
+    // guardEdges: one row per guarded TARGET, in fold order — today exactly
+    // 1 gate per target, so gateIds is always a singleton.
+    const guardEdges = document.guardEdges ?? [];
+    expect(guardEdges).toHaveLength(4);
+    const edgeByTarget = new Map(guardEdges.map((e) => [e.targetId, e.gateIds]));
+    expect(edgeByTarget.get('Circuit.Sim.play')).toEqual(['guard:loop.launchArm']);
+    expect(edgeByTarget.get('Circuit.Sim.step')).toEqual(['guard:loop.idle']);
+    expect(edgeByTarget.get('Circuit.Sim.strokeMove')).toEqual(['guard:stroke.active']);
+    expect(edgeByTarget.get('Circuit.Settings.setGranularity')).toEqual(['guard:settings.knownGranularity']);
+
+    // No gate-related unresolved kind (gateId/guardTarget/guardGate/unguardedGate)
+    // — every declaration resolved and every gate is actually referenced.
+    const gateUnresolvedKinds = new Set(['gateId', 'guardTarget', 'guardGate', 'unguardedGate']);
+    expect((document.unresolved ?? []).filter((u) => gateUnresolvedKinds.has(u.kind))).toEqual([]);
+  });
+
   it('a symbol shared by 2+ endpoints names all its real users (shared-stage analogue)', () => {
     const symbols = document.symbols;
     const diffStats = symbols.find((s) => s.id === 'Compute.Life.diffStats');
@@ -395,7 +468,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
   });
 
   it('declares its own current coverage ceiling honestly (not an aspirational value)', () => {
-    expect(document.meta.schemaVersion).toBe(10);
+    expect(document.meta.schemaVersion).toBe(12);
     // The honest current reach on the TS side — symbol-usage coverage stops at
     // the lower bound of explicit-symbolId stages + static call-site scanning
     // (not complete). It should flip to true only when coverage is actually
@@ -476,20 +549,29 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // the same fact never gets a second address.
     //
     // Duplicates in the list below are real shared usage, not noise:
-    // cellVisitGate appears twice because strokeStart/strokeMove share the
+    // cellVisitSwitch appears twice because strokeStart/strokeMove share the
     // appendStrokeVisit stage sequence; mergeGranularityBranches /
     // packGenerationResult / applyGenerationResult appear twice because
     // tickLoop/stepOnce share appendGeneration. Entry-position bare identifiers
     // (`pipeline(meta, fn)`) are detected the same as chain-link arguments —
-    // runningPhaseGate / idlePhaseGate / granularityGateAndPayload /
-    // inStrokeGate / armStrokeState / launchArmGate all have addresses. The
-    // Mutator-part extraction contributes the apply* family (buffer-transition
-    // tail effects that call no symbols) as named handlers too. `allStages`
+    // runningPhaseSwitch / armStrokeState all have addresses. The Mutator-part
+    // extraction contributes the apply* family (buffer-transition tail
+    // effects that call no symbols) as named handlers too. `allStages`
     // recurses untracked branches, so play's `.spawn` launcher contributes a
-    // SECOND `granularitySwitch` (the loop's self-divert re-arm is the first),
-    // and `launchArmGate` (play's double-start guard entry) appears.
+    // SECOND `granularitySwitch` (the loop's self-divert re-arm is the first).
     // `stepGranularitySwitch` (step.ts's divert into stepOnce) appears once —
     // a single entry stage, no self-divert twin (stepOnce never diverts back).
+    //
+    // The interceptor/gate migration REMOVED 4 names from this list —
+    // `granularityGateAndPayload` (renamed `knownGranularityGate`), `idlePhaseGate`,
+    // `inStrokeGate`, `launchArmGate` — not because they lost their names, but
+    // because they are no longer STAGE handlers at all: each now runs as a
+    // framework gate BEFORE its guarded port symbol's handler is invoked, so
+    // it has no address in any endpoint's stage tree. Their identity now
+    // lives in `document.gates[].handler` instead (see the gates test above).
+    // Each of their old pipe-entry positions is now an anonymous pass-through
+    // closure (`pipe(closure)`, `handler: null`) — see the expectedKinds test
+    // below for stepOnce/strokeMove's first-stage kind flip.
     const named = document.endpoints.flatMap((e) => allStages(e.stages)).filter((s) => s.handler !== null);
     expect(named.map((s) => s.handler!.functionName).sort()).toEqual([
       'applyGenerationResult',
@@ -500,21 +582,17 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       'applySpeed',
       'applyToggleStats',
       'armStrokeState',
-      'cellVisitGate',
-      'cellVisitGate',
-      'granularityGateAndPayload',
+      'cellVisitSwitch',
+      'cellVisitSwitch',
       'granularitySwitch',
       'granularitySwitch',
-      'idlePhaseGate',
-      'inStrokeGate',
-      'launchArmGate',
-      'loadedSettingsGate',
+      'loadedSettingsSwitch',
       'mergeGranularityBranches',
       'mergeGranularityBranches',
       'packGenerationResult',
       'packGenerationResult',
       'packRandomizeResult',
-      'runningPhaseGate',
+      'runningPhaseSwitch',
       'sleepForSpeed',
       'stepGranularitySwitch',
     ]);
@@ -530,27 +608,36 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     for (const endpoint of document.endpoints) {
       expect(endpoint.emittableVerbs.every((v) => ['abort', 'divert', 'fail'].includes(v)), endpoint.key).toBe(true);
     }
-    // tick/step abort on the running guard — the abort lives in the bodies of
-    // the cross-file helpers tickLoopPipeFor/stepOncePipeFor (picked up by
-    // helper following). With runningPhaseGate/idlePhaseGate as named
-    // functions the value stays ['abort'] — only divert is excluded from the
-    // aggregation, while abort/fail are counted even inside named handler
-    // bodies. Mechanical evidence that naming a handler does not make its
-    // emittableVerbs disappear.
+    // tick's abort lives in the body of the cross-file helper
+    // tickLoopPipeFor (picked up by helper following): runningPhaseSwitch is
+    // still an in-pipe Switch (unaffected by the gate migration — it decides
+    // AND self-terminates the loop, which a pre-handler veto cannot express).
+    // stepOnce's OWN abort is gone: idlePhaseGate migrated to a framework gate
+    // guarding `Circuit.Sim.step` — it runs before stepOnce's own stage tree
+    // even starts, so stepOnce's `emittableVerbs` is now `[]` (nothing left
+    // inside appendGeneration's own sequence emits a non-next verb).
+    // Mechanical evidence that a gate is invisible to the STAGE-TREE
+    // aggregation by construction — its verdicts are a different index
+    // section entirely (`document.gates`), not folded into any endpoint.
     expect(byKey.get('Circuit.Sim.tickLoop')).toEqual(['abort']);
-    expect(byKey.get('Circuit.Sim.stepOnce')).toEqual(['abort']);
+    expect(byKey.get('Circuit.Sim.stepOnce')).toEqual([]);
     // stroke's abort (outside-the-board / same cell) and divert (to togglePipe)
-    // live inside the shared appendStrokeVisit stages (cellVisitGate, a named
+    // live inside the shared appendStrokeVisit stages (cellVisitSwitch, a named
     // function). Even in a named handler's body, divert alone is excluded from
     // emittableVerbs — divertsTo/symbolId already hold that edge's address
     // (avoiding double counting). abort has no such alternate channel, so it is
-    // counted: strokeStart picks up cellVisitGate's abort → ['abort'];
-    // strokeMove's aborts from cellVisitGate and from its own entry gate
-    // (inStrokeGate) de-dupe into the same Set → ['abort'].
+    // counted: strokeStart picks up cellVisitSwitch's abort → ['abort'];
+    // strokeMove's abort ALSO stays ['abort'] — cellVisitSwitch is still an
+    // in-pipe Switch (it diverts on success, a routing verb a gate cannot
+    // express), but the OTHER source it used to have — its own entry gate
+    // (inStrokeGate) — migrated out to guard:stroke.active and no longer
+    // contributes here; cellVisitSwitch alone is enough to keep the value.
     expect(byKey.get('Circuit.Sim.strokeStart')).toEqual(['abort']);
     expect(byKey.get('Circuit.Sim.strokeMove')).toEqual(['abort']);
-    // Unknown-value gate → abort.
-    expect(byKey.get('Circuit.Settings.setGranularity')).toEqual(['abort']);
+    // Unknown-value gate migrated to guard:settings.knownGranularity (a
+    // framework gate, invisible to the stage tree — see stepOnce's own
+    // comment above), so setGranularity's own emittableVerbs is now `[]`.
+    expect(byKey.get('Circuit.Settings.setGranularity')).toEqual([]);
     expect(byKey.get('Circuit.Settings.hydrateSettings')).toEqual(['abort']);
     // The floor on the undetected side: the tick loop's self-divert is a
     // delegation to granularitySwitch (a Switch part), not an inline divert()
@@ -569,12 +656,21 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // are recovered with concrete types (with a safety net that matches each
     // link's derived kind against the projected stage kind and refuses to
     // attach on a mismatch).
-    // Root/entry gates and the two named `.map`/`.effect` links (bare
-    // identifiers — mergeGranularityBranches/packGenerationResult/
-    // applyGenerationResult/sleepForSpeed/granularitySwitch/cellVisitGate/
-    // armStrokeState/inStrokeGate) mint the `(function)` operand; the two
-    // remaining inline-arrow assembly stages per chain stay `(closure)`
-    // (kernel-introspect StageKind symbol/function/closure operand split).
+    // Root/entry stages that are STILL in-pipe Switch parts (bare identifiers
+    // — mergeGranularityBranches/packGenerationResult/applyGenerationResult/
+    // sleepForSpeed/granularitySwitch/cellVisitSwitch/armStrokeState/
+    // runningPhaseSwitch) mint the `(function)` operand; the two remaining
+    // inline-arrow assembly stages per chain stay `(closure)` (kernel-introspect
+    // StageKind symbol/function/closure operand split).
+    //
+    // stepOnce's and strokeMove's own FIRST stage flips from `(function)` to
+    // `(closure)` here — the interceptor/gate migration: idlePhaseGate /
+    // inStrokeGate used to be THIS stage (a named bare-identifier entry gate);
+    // now each is a framework gate guarding its port symbol from outside the
+    // pipe entirely, so this pipe's own entry is a minimal anonymous
+    // pass-through (`(_kernel, payload) => next(...)`, `handler: null`).
+    // tickLoop/strokeStart are untouched — their own entry stages
+    // (runningPhaseSwitch / armStrokeState) are not part of this migration.
     const expectedKinds: Record<string, string[]> = {
       'Circuit.Sim.tickLoop': [
         'pipe(function)',
@@ -589,7 +685,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         'pipe(function)',
       ],
       'Circuit.Sim.stepOnce': [
-        'pipe(function)',
+        'pipe(closure)',
         'pipe(closure)',
         'fork(branches)',
         'map(function)',
@@ -599,7 +695,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         'effect(function)',
       ],
       'Circuit.Sim.strokeStart': ['pipe(function)', 'pipe(closure)', 'pipe(symbol)', 'pipe(function)'],
-      'Circuit.Sim.strokeMove': ['pipe(function)', 'pipe(closure)', 'pipe(symbol)', 'pipe(function)'],
+      'Circuit.Sim.strokeMove': ['pipe(closure)', 'pipe(closure)', 'pipe(symbol)', 'pipe(function)'],
     };
     for (const [key, kinds] of Object.entries(expectedKinds)) {
       const stages = byKey.get(key)?.stages ?? [];
@@ -653,10 +749,10 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(sites.every((s) => /^src\/.+\.tsx?:\d+$/.test(s))).toBe(true);
   });
 
-  it('named-mutation vocabulary (StateAccessEntry.via) is a genuine soft-null, explicitly reported', () => {
-    // All 15 catalogued-pipe buffer.mutate sites are object-literal spread
+  it('named-mutation vocabulary (StateAccessEntry.via) is a genuine soft-null, no longer reported since schema v12', () => {
+    // All 20 catalogued-pipe buffer.mutate sites are object-literal spread
     // rebuilds of the `(state) => ({ ...state, field: value })` shape, not
-    // named method calls — via at 0/15 is the honest current state. The scope
+    // named method calls — via at 0/20 is the honest current state. The scope
     // is catalogued pipes only (kind !== 'command') — command endpoints'
     // LoopState writes (play/pause) are outside this aggregate.
     const catalogedEndpoints = document.endpoints.filter((e) => e.kind !== 'command');
@@ -668,9 +764,14 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(resolvedViaCount).toBe(0);
     expect(totalMutateSites).toBeGreaterThan(0);
 
+    // schema v12: namedMutationVia is reported only when SOME state declares a
+    // mutating-method vocabulary (mutatingMethods non-empty) or a via actually
+    // resolved (resolvedViaCount > 0). This app's Contract states (Grid/Sim/
+    // Stats) declare ZERO mutating methods and resolve ZERO via calls, so a
+    // 0/N via count here is the expected shape for "no vocabulary exists at
+    // all", not a coverage gap — the entry is suppressed.
     const summary = (document.unresolved ?? []).find((u) => u.kind === 'namedMutationVia');
-    expect(summary).toBeDefined();
-    expect(summary?.detail).toContain(`resolved for 0/${totalMutateSites}`);
+    expect(summary).toBeUndefined();
 
     // mutatingMethods exist on none of Grid/Sim/Stats (plain readonly data
     // interfaces) — the permanent [] is an honest scan result, not a hardcoded
@@ -703,30 +804,42 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(offBuffer).toEqual([]);
   });
 
-  it('accounts for every unresolved entry: exactly the known 2 (stateDeclaration + namedMutationVia, zero orphanEntry)', () => {
-    // A record of the current reach. The remaining 2 are each a deliberate
-    // scan-scope boundary, not a hole:
-    //   stateDeclaration  — KernelErrorState lives in kernelee core (outside the scan root)
-    //   namedMutationVia  — contract states have 0 methods (soft-null; the writes themselves are indexed)
-    // orphanEntry is now ZERO (dropped 1 → 0): stepOnce, the last real orphan
-    // (card B004D425), is resolved the SAME structural way tickLoop's orphan
-    // was (card 4/4) — a distinct catalogued saga node reached by an external
-    // `divertsTo` edge from a calling stage — but with a DIFFERENT verb:
-    // `step` reaches `stepOnce` via `divert` (in-pipe, on-bus, awaited by
-    // `kernel.run`), not play's detached `.spawn`, because step's one-shot lap
-    // has no daemon guard of its own and must stay serialized by the bus (see
-    // step.ts's doc comment). The orphan check is unchanged; the topology
-    // genuinely gained an edge.
-    // If this number grows, look at the kind breakdown in the diff first — a
-    // total alone cannot reveal offsetting changes.
+  it('accounts for every unresolved entry: the true-unknown floor is zero (schema v12)', () => {
+    // Both former occupants of this ledger (stateDeclaration for
+    // KernelErrorState, namedMutationVia for the 0-method Contract states)
+    // were classification mistakes, not genuine unknowns — each borrowed the
+    // `unresolved` slot for an already-understood fact:
+    //   stateDeclaration  — KernelErrorState is framework-injected
+    //                       (origin: 'framework'), not an app state whose
+    //                       declaration this scan failed to find; schema v12
+    //                       gives it its own `origin` field instead of
+    //                       riding the unresolved ledger.
+    //   namedMutationVia  — this app declares ZERO mutating-method vocabulary
+    //                       (Grid/Sim/Stats are plain readonly-field data
+    //                       interfaces) and resolves ZERO via calls, so 0/N
+    //                       is the expected shape for "no vocabulary exists
+    //                       at all", not a coverage gap; schema v12
+    //                       suppresses the report in exactly this case.
+    // orphanEntry stays ZERO (dropped 1 → 0 in an earlier card): stepOnce,
+    // the last real orphan (card B004D425), is resolved the SAME structural
+    // way tickLoop's orphan was (card 4/4) — a distinct catalogued saga node
+    // reached by an external `divertsTo` edge from a calling stage — but with
+    // a DIFFERENT verb: `step` reaches `stepOnce` via `divert` (in-pipe,
+    // on-bus, awaited by `kernel.run`), not play's detached `.spawn`, because
+    // step's one-shot lap has no daemon guard of its own and must stay
+    // serialized by the bus (see step.ts's doc comment).
+    //
+    // This floor is deliberately a hard 0, not "whatever an allowlist
+    // permits": even a FUTURE known-and-accepted item (e.g. one added to
+    // ASSEMBLED_WIRING_ISSUE_ALLOWLIST) should still break this test — the
+    // point of a hard 0 is that `unresolved` is reserved for TRUE unknowns
+    // only, so any new entry, however well-understood or allowlisted
+    // elsewhere, forces a conscious decision (fix the classification, or
+    // consciously decide it belongs here) instead of silently widening what
+    // "unresolved" means. If this grows, look at the kind breakdown in the
+    // diff first — a total alone cannot reveal offsetting changes.
     const unresolved = document.unresolved ?? [];
-    const byKind = new Map<string, number>();
-    for (const entry of unresolved) byKind.set(entry.kind, (byKind.get(entry.kind) ?? 0) + 1);
-    expect(Object.fromEntries(byKind)).toEqual({
-      stateDeclaration: 1,
-      namedMutationVia: 1,
-    });
-    expect(unresolved).toHaveLength(2);
+    expect(unresolved).toEqual([]);
   });
 
   it('every pipe(closure) stage always carries a note — the gate/assembly family has no other identity (CI floor)', () => {
@@ -769,10 +882,10 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // The asymmetry is deliberate and stated: the reverse direction (that every
     // branching pipe(closure) in the index lives in *.switch.ts) is out of this
     // test's scope. Exhaustively tracking the existing anonymous pipe(closure)
-    // gates (like the caller-side note of the outside-the-board/same-cell gate —
-    // gates not yet named functions, or deliberately outside selects-only)
-    // would require interpreting note wording, not just handler, so it is
-    // deliberately not done here.
+    // switches (like the caller-side note of the outside-the-board/same-cell
+    // switch — switches not yet named functions, or deliberately outside
+    // selects-only) would require interpreting note wording, not just handler,
+    // so it is deliberately not done here.
     const handlerSites = new Set(
       document.endpoints.flatMap((e) => allStages(e.stages)).map((s) => s.handler?.site).filter((s): s is string => !!s),
     );
@@ -784,7 +897,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     }
   });
 
-  it('parts: all 17 part files (switch 9 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
+  it('parts: all 13 part files (switch 5 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
     // The test above (the handler.site reference floor) is "prevention of dead
     // part files" seen from the filesystem side. This one is the index itself
     // producing the parts section — the subgraph-as-nodes answer to "can this
@@ -793,21 +906,22 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // bless regressions — an expectation-lowering diff is the strongest
     // regression signal).
     //
-    // The 9 switches: granularity / runningPhase / idlePhase / inStroke /
-    // cellVisit / knownGranularity / loadedSettings / launchArm / stepGranularity
-    // — the last two new: launchArm in card 4/4 (play's double-start guard,
-    // extracted when play became a saga), stepGranularity in card B004D425
-    // (step's divert-target chooser, extracted when step became a saga — the
-    // structural twin of granularity.switch.ts, but a ONE-SHOT hop, not
-    // self-diverting). The 6 mutators: running (now pause only) / generation /
-    // randomize / toggleCell / stroke / simState. The bridge kind exists as a
-    // slot but lifegame has 0 (the slot existing is itself meaningful — see
+    // The 5 switches: granularity / runningPhase / cellVisit / loadedSettings /
+    // stepGranularity. Down from 9 (the interceptor/gate migration): launchArm /
+    // idlePhase / inStroke / knownGranularity are no longer part files at all —
+    // each is a `*.gate.ts` framework interceptor (declareGate/KernelBuilder.
+    // guard), invisible to the switch/emitter/mutator topology because it runs
+    // BEFORE its guarded port symbol's handler is even invoked (no stage-link
+    // chain — see circuit/sim/launchArm.gate.ts's own doc comment). The 6
+    // mutators: running (now pause only) / generation / randomize / toggleCell /
+    // stroke / simState — unaffected by this migration. The bridge kind exists
+    // as a slot but lifegame has 0 (the slot existing is itself meaningful — see
     // arch-circuit.md), so it does not appear in byKind.
     const parts = document.parts ?? [];
     const byKind = new Map<string, number>();
     for (const part of parts) byKind.set(part.kind, (byKind.get(part.kind) ?? 0) + 1);
-    expect(Object.fromEntries(byKind)).toEqual({ switch: 9, emitter: 2, mutator: 6 });
-    expect(parts).toHaveLength(17);
+    expect(Object.fromEntries(byKind)).toEqual({ switch: 5, emitter: 2, mutator: 6 });
+    expect(parts).toHaveLength(13);
     expect(parts.filter((p) => p.kind === 'bridge')).toEqual([]);
 
     // usedBy is non-empty for every part (empty would raise a partUsage
@@ -853,21 +967,29 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // (tickLoop) AND play's `.spawn` launcher both reuse it (the same "read
     // granularity+board-size → divert into tickLoopPipeFor" hop).
     expect(byId.get('granularity.switch')?.usedBy).toEqual(['Circuit.Sim.play', 'Circuit.Sim.tickLoop']);
-    // launchArm.switch: play's double-start guard (new in card 4/4).
-    expect(byId.get('launchArm.switch')?.usedBy).toEqual(['Circuit.Sim.play']);
-    // stepGranularity.switch: step's divert-target chooser (new in card
-    // B004D425) — a ONE-SHOT hop into stepOnce, not a self-divert, so unlike
+    // stepGranularity.switch: step's divert-target chooser (card B004D425) —
+    // a ONE-SHOT hop into stepOnce, not a self-divert, so unlike
     // granularity.switch it has exactly one user.
     expect(byId.get('stepGranularity.switch')?.usedBy).toEqual(['Circuit.Sim.step']);
-    // Singly-used parts are indexed too (unlike sharedStages, parts have no shared-count cutoff).
-    expect(byId.get('idlePhase.switch')?.usedBy).toEqual(['Circuit.Sim.stepOnce']);
-    expect(byId.get('inStroke.switch')?.usedBy).toEqual(['Circuit.Sim.strokeMove']);
-    // runningPhase.switch stays tickLoop-only: it is the LOOP's own entry gate,
-    // reached from play only by divert (not in play's spawn stage tree).
+    // runningPhase.switch stays tickLoop-only: it is the LOOP's own entry
+    // switch, reached from play only by divert (not in play's spawn stage
+    // tree). Unlike launchArm/idlePhase (play's/step's own entry gates),
+    // runningPhase guards the loop's OWN re-entry into itself on every lap
+    // (self-divert) — a decision that also self-terminates the pipe, which a
+    // pre-handler veto cannot express — so it stays a Switch, not a gate
+    // migration candidate.
     expect(byId.get('runningPhase.switch')?.usedBy).toEqual(['Circuit.Sim.tickLoop']);
     expect(byId.get('randomize.emitter')?.usedBy).toEqual(['Circuit.Sim.randomize']);
-    expect(byId.get('knownGranularity.switch')?.usedBy).toEqual(['Circuit.Settings.setGranularity']);
     expect(byId.get('loadedSettings.switch')?.usedBy).toEqual(['Circuit.Settings.hydrateSettings']);
+    // launchArm.switch / idlePhase.switch / inStroke.switch / knownGranularity.switch
+    // are GONE from parts entirely (see byKind above) — moved to
+    // circuit/sim/launchArm.gate.ts / idlePhase.gate.ts / inStroke.gate.ts /
+    // circuit/settings/knownGranularity.gate.ts, indexed instead under
+    // `document.gates` (see the dedicated gates test above), not `parts`.
+    expect(byId.has('launchArm.switch')).toBe(false);
+    expect(byId.has('idlePhase.switch')).toBe(false);
+    expect(byId.has('inStroke.switch')).toBe(false);
+    expect(byId.has('knownGranularity.switch')).toBe(false);
   });
 
   /**
@@ -882,6 +1004,14 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
    * into `*.mutator.ts` (the default answer), or (b) if it is genuinely
    * inseparable, declare the reason in that file's own doc comment and append
    * it to this allowlist (currently 4 entries).
+   *
+   * The interceptor/gate migration moved launchArm's write from a pipe-entry
+   * Switch stage to a framework gate — the ALLOWLIST ENTRY follows the write
+   * to its new site (`launchArm.gate.ts`, not `launchArm.switch.ts`), and the
+   * test below now also walks `document.gates[].writesState` (phased 'gate'),
+   * so the write stays visible to this net even though it left the stage tree
+   * entirely (see the dedicated gates test above for the same fact from the
+   * schema side).
    */
   const WRITES_STATE_MUTATOR_ALLOWLIST: ReadonlyArray<{ readonly file: string; readonly reason: string }> = [
     {
@@ -892,11 +1022,14 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         "runningPhase.switch.ts's own doc comment.",
     },
     {
-      file: 'src/circuit/sim/launchArm.switch.ts',
+      file: 'src/circuit/sim/launchArm.gate.ts',
       reason:
         "play's double-start guard: `wasIdle` must be read and the LoopState phase applied (→running) atomically " +
         '(no await between) or a re-entrant play could double-launch the loop — the write is inseparable from the ' +
-        "launch/recover decision, the same exception shape as runningPhase.switch.ts. Declared in launchArm.switch.ts's own doc comment.",
+        'launch/recover decision, the same exception shape as runningPhase.switch.ts. Migrated from a pipe-entry ' +
+        'Switch to a framework gate (guard:loop.launchArm, guarding Circuit.Sim.play) — the write now surfaces via ' +
+        "document.gates[].writesState (phase 'gate') rather than any endpoint's writesState. Declared in " +
+        "launchArm.gate.ts's own doc comment.",
     },
     {
       file: 'src/circuit/sim/cellVisit.switch.ts',
@@ -916,14 +1049,18 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     },
   ];
 
-  it('writesState lives in *.mutator.ts or in a declared-exception *.switch.ts — errorSink excluded (CI floor)', () => {
+  it('writesState lives in *.mutator.ts or in a declared-exception *.switch.ts/*.gate.ts — errorSink excluded (CI floor)', () => {
     const fileOf = (site: string): string => site.replace(/:\d+$/, '');
     const allowlistedFiles = new Set(WRITES_STATE_MUTATOR_ALLOWLIST.map((e) => e.file));
 
     // `endpoint.writesState` is already the fully-attributed, recursively
     // collected list (fork branches included) — no separate stage-tree walk
     // needed here, unlike the note/handler checks above that inspect
-    // StageEntry directly.
+    // StageEntry directly. `document.gates[].writesState` (schemaVersion 11)
+    // is folded in alongside it: a gate write is real causality too — leaving
+    // it out of this net just because it now lives in a different index
+    // section would silently exempt it from the "mutator or declared
+    // exception" discipline, not merely relocate the check.
     const offenders: Array<{ key: string; state: string; site: string }> = [];
     for (const endpoint of document.endpoints) {
       for (const write of endpoint.writesState) {
@@ -936,18 +1073,33 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         }
       }
     }
+    for (const gate of document.gates ?? []) {
+      for (const write of gate.writesState) {
+        const file = fileOf(write.site);
+        const isMutator = file.endsWith('.mutator.ts');
+        const isAllowlisted = allowlistedFiles.has(file);
+        if (!isMutator && !isAllowlisted) {
+          offenders.push({ key: gate.id, state: write.state, site: write.site });
+        }
+      }
+    }
     expect(offenders, JSON.stringify(offenders, null, 2)).toEqual([]);
 
     // The debt list is actually alive (each allowlist entry is exercised by
     // real data) — confirm every entry is actually used by at least one
     // non-errorSink write (prevention of dead allowlist entries; the same
-    // "never drop a miss silently" discipline as partUsage).
-    const usedFiles = new Set(
-      document.endpoints
+    // "never drop a miss silently" discipline as partUsage). Gate writes are
+    // folded into the SAME usedFiles set as endpoint writes — one liveness
+    // check, two sources — otherwise launchArm.gate.ts's entry would read as
+    // dead the moment its write left the stage tree, even though the write is
+    // still there, just relocated.
+    const usedFiles = new Set([
+      ...document.endpoints
         .flatMap((e) => e.writesState)
         .filter((w) => w.phase !== 'errorSink')
         .map((w) => fileOf(w.site)),
-    );
+      ...(document.gates ?? []).flatMap((g) => g.writesState).map((w) => fileOf(w.site)),
+    ]);
     for (const entry of WRITES_STATE_MUTATOR_ALLOWLIST) {
       expect(usedFiles.has(entry.file), `${entry.file}: dead allowlist entry (no non-errorSink write there)`).toBe(
         true,

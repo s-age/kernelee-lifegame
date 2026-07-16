@@ -1,12 +1,15 @@
 // circuit/sim/play.ts — play saga.
 //
 // **detached fork (`.spawn`)** — the culmination of the detached-fork-branch
-// arc. `play` arms the loop phase (the double-start guard, launchArm.switch.ts)
-// and then LAUNCHES the generation loop as an UNTRACKED fork branch: a
-// first-class `.spawn` stage on the wiring graph, NOT the old
-// `void kernel.run(tickLoopPipeFor(...)).catch(settleTickLoopFault)` escape.
+// arc. `play`'s double-start guard now runs as a framework GATE
+// (`guard:loop.launchArm`, circuit/sim/launchArm.gate.ts) BEFORE this pipe
+// even starts — see driver/wiring.ts's `bindGuards` — so `playPipe` itself
+// opens with a minimal entry stage and LAUNCHES the generation loop as an
+// UNTRACKED fork branch: a first-class `.spawn` stage on the wiring graph,
+// NOT the old `void kernel.run(tickLoopPipeFor(...)).catch(settleTickLoopFault)`
+// escape.
 //
-// What the migration bought:
+// What the ORIGINAL migration (to `.spawn`) bought:
 // - the imperative `kernel.run().catch()` is gone — the launch is an
 //   architectural stage, and the spawn's untracked branch is a visible edge
 //   from `play` to the loop (resolving tickLoop's orphan — see
@@ -16,10 +19,14 @@
 //   (LoopState → idle so the UI's Play control re-arms) lives in the
 //   composition root's `onError` policy (driver/wiring.ts), matched by the
 //   shared `TICK_LOOP_LAUNCH_NOTE` source label below.
+//
+// What THIS migration (the double-start guard: pipe-entry Switch → gate)
+// bought: the veto is now enforced at the `Circuit.Sim.play` call boundary
+// itself, not merely at this pipe's first stage — a future second entry point
+// into `playPipe` (there is none today) could not accidentally bypass it.
 
-import { pipeline, type Kernel, type Pipe } from '@s-age/kernelee';
+import { next, pipeline, type Kernel, type Pipe } from '@s-age/kernelee';
 import { granularitySwitch } from './granularity.switch';
-import { launchArmGate } from './launchArm.switch';
 import { CircuitSimKeys } from './wiringKeys';
 
 /**
@@ -32,14 +39,15 @@ import { CircuitSimKeys } from './wiringKeys';
 export const TICK_LOOP_LAUNCH_NOTE = 'Launch the generation loop (detached — fire-and-forget)';
 
 /**
- * The play saga: arm the loop phase (launchArm.switch.ts — launch fresh from
- * idle, recover-only otherwise), then `.spawn` the detached generation loop.
- * `.spawn` forwards the void cursor, so the saga's output stays void; the
- * spawned launcher outlives the run (a non-terminating self-diverting loop).
+ * The play saga: a minimal entry stage (the double-start guard already ran as
+ * this pipe's guarding gate — see file header) then `.spawn` the detached
+ * generation loop. `.spawn` forwards the void cursor, so the saga's output
+ * stays void; the spawned launcher outlives the run (a non-terminating
+ * self-diverting loop).
  */
 export const playPipe: Pipe<void, void> = pipeline(
-  { note: 'Arm the loop phase (double-start guard): launch fresh from idle, recover-only otherwise' },
-  launchArmGate,
+  { note: 'Enter play (the double-start guard already ran as the guarding gate — guard:loop.launchArm)' },
+  (_kernel: Kernel, _payload: void) => next(),
 )
   .spawn(
     { note: TICK_LOOP_LAUNCH_NOTE },

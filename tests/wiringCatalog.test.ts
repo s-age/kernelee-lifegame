@@ -22,8 +22,8 @@ import { RAW_WIRING_ISSUE_ALLOWLIST } from '../scripts/wiringIssueAllowlist';
 
 describe('buildWiringCatalog + validateWiringGraph', () => {
   it('no issue appears beyond RAW_WIRING_ISSUE_ALLOWLIST, and every listed issue actually appears', () => {
-    const { boundSymbolIds, flowCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
-    const doc = projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds);
+    const { boundSymbolIds, flowCatalog, guardCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
+    const doc = projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds, guardCatalog);
     const issues = validateWiringGraph(doc);
 
     const allowedSet = new Set(RAW_WIRING_ISSUE_ALLOWLIST.map((e) => `${e.kind}:${e.key}`));

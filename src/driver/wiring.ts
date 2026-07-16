@@ -1,11 +1,15 @@
 // driver/wiring.ts — the wiring manifest. The single place where every device is wired.
 
-import { BufferBuilder, KernelBuilder, KernelErrorState, type Buffer, type Kernel, type PipeDescriptorEntry, type TraceSink } from '@s-age/kernelee';
+import { BufferBuilder, KernelBuilder, KernelError, KernelErrorState, type Buffer, type GuardCatalogEntry, type Kernel, type PipeDescriptorEntry, type TraceSink } from '@s-age/kernelee';
 import { LifePort, SettingsPort, SettingsStorePort, SimFlowKeys, SimPort, type SettingsStoreDevice } from '../contract/ports';
-import { GridState, LoopState, SimState, StatsState, StrokeState } from '../contract/states';
+import { GridState, LoopState, SimState, StatsState, StrokeState, WiringDefectState } from '../contract/states';
 import { lifeDevice } from '../compute/device';
 import { settingsDevice } from '../circuit/settings';
+import { knownGranularityGateRef } from '../circuit/settings/knownGranularity.gate';
 import { simDevice } from '../circuit/sim';
+import { idlePhaseGateRef } from '../circuit/sim/idlePhase.gate';
+import { inStrokeGateRef } from '../circuit/sim/inStroke.gate';
+import { launchArmGateRef } from '../circuit/sim/launchArm.gate';
 import { TICK_LOOP_LAUNCH_NOTE } from '../circuit/sim/play';
 import { togglePipe } from '../circuit/sim/toggleCell';
 
@@ -58,6 +62,30 @@ export function bindFlows(builder: KernelBuilder): void {
     togglePipe,
     'Toggles a single cell copy-on-write and pair-emits the transition stats. Also the divert target of the stroke saga.',
   );
+  // Guards ride along with flows here (not only from makeKernel below): a
+  // caller that reproduces this repo's wiring by hand while substituting one
+  // device — tests/circuit.test.ts's `makeFaultyLoopKernel` swaps LifePort's
+  // implementation but still calls `bindFlows` for "the rest of the wiring
+  // manifest" — must still get every gate wired, or a veto that owns a
+  // buffer write (launchArm's double-start guard) would silently vanish
+  // rather than merely relocate. `KernelBuilder.guard` is idempotent per
+  // `(target, gate)` pair, so a caller that also calls `bindGuards` directly
+  // (as `makeKernel` does not need to, but safely could) pays no double cost.
+  bindGuards(builder);
+}
+
+/**
+ * Bind every declared gate to its guarded target — the pre-handler-veto half
+ * of the wiring manifest, grouped by target (one `builder.guard(...)` block
+ * per port). Fold order per target follows call order here (see
+ * `KernelBuilder.guard`'s own doc comment); today every target has exactly
+ * one gate, so order is not yet a live concern.
+ */
+export function bindGuards(builder: KernelBuilder): void {
+  builder.guard(SimPort.play, launchArmGateRef);
+  builder.guard(SimPort.step, idlePhaseGateRef);
+  builder.guard(SimPort.strokeMove, inStrokeGateRef);
+  builder.guard(SettingsPort.setGranularity, knownGranularityGateRef);
 }
 
 /**
@@ -75,13 +103,32 @@ export function bindFlows(builder: KernelBuilder): void {
  * stop a running loop. `getBuffer` is a late-bound accessor for the kernel's
  * built buffer (the sink is created before `build()` returns the kernel, but
  * only ever CALLED at runtime, long after the buffer exists).
+ *
+ * The write also splits by audience: a `KernelError` (miswired — a wiring-time
+ * programming bug) goes to `WiringDefectState`, the developer-facing surface;
+ * everything else (a domain failure) goes to `KernelErrorState`, the
+ * user-facing banner, as before.
  */
 export function loopFaultSink(getBuffer: () => Buffer): (source: string, error: unknown) => void {
   return (source, error) => {
     if (source === TICK_LOOP_LAUNCH_NOTE) {
-      getBuffer().mutate(LoopState, (loop) => (loop.phase === 'idle' ? loop : { phase: 'idle' as const }));
+      getBuffer().mutate(LoopState, (loop) => (loop.phase === 'idle' ? loop : { phase: 'idle' as const })); // recovery is unconditional
     }
-    // Reproduce the framework default sink's write (an injected onError replaces it entirely).
+
+    if (error instanceof KernelError) {
+      // Miswired (a wiring-time programming bug) goes to the DEVELOPER surface —
+      // never to the domain-error surface (KernelErrorState → ErrorBanner).
+      // This app renders no UI for WiringDefectState (silent by choice); the
+      // write is kept live so tests can assert the split and the claim can't rot.
+      console.error(`[wiring defect] ${source}:`, error);
+      getBuffer().mutate(WiringDefectState, () => ({
+        message: `${source}: [${error.code}] ${error.symbolId} — ${error.message}`,
+      }));
+      return;
+    }
+
+    // Domain failure — the user-facing banner, as before. Keep the non-Error
+    // normalization (an unknown can be thrown that isn't an Error).
     const message = error instanceof Error ? error.message : String(error);
     getBuffer().mutate(KernelErrorState, () => ({ message: `${source}: ${message}` }));
   };
@@ -115,24 +162,34 @@ export function loopFaultSink(getBuffer: () => Buffer): (source: string, error: 
  * same reason: it is the flow-binding table's own derived catalog (kernelee
  * guarantees a `flow()`-bound pipe cannot be wired without being catalogued),
  * which `mergeWiringCatalog` (circuit/wiringCatalog.ts) folds into the
- * projected catalog at the consumers.
+ * projected catalog at the consumers. `guardCatalog` rides along for the same
+ * reason again: `KernelBuilder.guardCatalog` only exists before `build()`
+ * too, and `projectWiringGraph`'s v6 `guards` field is required, not
+ * optional — the composition root has no other way to obtain it.
  */
 export function makeKernel(
   infra: InfrastructureDevices,
   trace?: { onTrace?: TraceSink },
-): { kernel: Kernel; boundSymbolIds: ReadonlySet<string>; flowCatalog: readonly PipeDescriptorEntry[] } {
+): {
+  kernel: Kernel;
+  boundSymbolIds: ReadonlySet<string>;
+  flowCatalog: readonly PipeDescriptorEntry[];
+  guardCatalog: readonly GuardCatalogEntry[];
+} {
   const buffer = new BufferBuilder();
   buffer.allocate(GridState);
   buffer.allocate(SimState);
   buffer.allocate(StatsState);
   buffer.allocate(LoopState);
   buffer.allocate(StrokeState);
+  buffer.allocate(WiringDefectState);
 
   const builder = new KernelBuilder();
   wireAllDevices(builder, infra);
   bindFlows(builder);
   const boundSymbolIds = builder.boundSymbolIds;
   const flowCatalog = builder.flowCatalog;
+  const guardCatalog = builder.guardCatalog;
   // `loopFaultSink` needs the built buffer, which `build()` produces from the
   // `BufferBuilder` above; the sink closes over `() => kernel.buffer` (a const
   // captured by the closure, only invoked at fault time — never during build).
@@ -144,5 +201,5 @@ export function makeKernel(
   const kernel = builder.build(
     trace ? { buffer, tracing: true, onTrace: trace.onTrace, onError } : { buffer, onError },
   );
-  return { kernel, boundSymbolIds, flowCatalog };
+  return { kernel, boundSymbolIds, flowCatalog, guardCatalog };
 }

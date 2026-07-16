@@ -1,14 +1,15 @@
 // CircuitTests (headless) — verify the tick loop (divert) and the Sim operations by running the whole kernel.
 // No UI: driven solely by makeTestKernel (the same wiring as production) + calls via SimPort.
 
-import { BufferBuilder, KernelBuilder, KernelErrorState } from '@s-age/kernelee';
-import { describe, expect, it } from 'vitest';
+import { BufferBuilder, KernelBuilder, KernelError, KernelErrorState } from '@s-age/kernelee';
+import { describe, expect, it, vi } from 'vitest';
 import { LifePort, SettingsPort, SettingsStorePort, SimPort, type LifeDevice } from '../src/contract/ports';
-import { GridState, LoopState, SimState, StatsState, StrokeState, type ForkGranularity } from '../src/contract/states';
+import { GridState, LoopState, SimState, StatsState, StrokeState, WiringDefectState, type ForkGranularity } from '../src/contract/states';
 import { lifeDevice } from '../src/compute/device';
 import { settingsDevice } from '../src/circuit/settings';
 import { simDevice } from '../src/circuit/sim';
 import { bindFlows, loopFaultSink } from '../src/driver/wiring';
+import { TICK_LOOP_LAUNCH_NOTE } from '../src/circuit/sim/play';
 import { makeSettingsStore, memoryStorage } from '../src/infrastructure/settingsStore';
 import { makeTestKernel } from './testKernel';
 
@@ -112,6 +113,57 @@ describe('Circuit.Sim.play — detached loop fault recovery (the .spawn errorSin
     expect(built.read(LoopState).phase).toBe('running'); // loop untouched
     expect(built.read(KernelErrorState).message).toContain('disk full'); // still surfaced
   });
+
+  it('a KernelError (miswired) goes to WiringDefectState, NOT the domain-error surface — LoopState still recovers', () => {
+    const buffer = new BufferBuilder();
+    buffer.allocate(LoopState);
+    buffer.allocate(WiringDefectState);
+    const built = buffer.build();
+    built.mutate(LoopState, () => ({ phase: 'running' as const }));
+    const sink = loopFaultSink(() => built);
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const error = new KernelError('unbound', 'Sim.tick', 'no flow bound for this dispatch key');
+    sink(TICK_LOOP_LAUNCH_NOTE, error);
+
+    expect(built.read(LoopState).phase).toBe('idle'); // recovery is unconditional
+    expect(built.read(KernelErrorState).message).toBeNull(); // domain surface untouched
+    const defect = built.read(WiringDefectState).message;
+    expect(defect).toContain(TICK_LOOP_LAUNCH_NOTE);
+    expect(defect).toContain('unbound');
+    expect(defect).toContain('Sim.tick');
+    expect(consoleSpy).toHaveBeenCalledTimes(1);
+
+    consoleSpy.mockRestore();
+  });
+
+  it('a domain failure (plain Error) still goes to KernelErrorState — WiringDefectState untouched', () => {
+    const buffer = new BufferBuilder();
+    buffer.allocate(LoopState);
+    buffer.allocate(WiringDefectState);
+    const built = buffer.build();
+    built.mutate(LoopState, () => ({ phase: 'running' as const }));
+    const sink = loopFaultSink(() => built);
+
+    sink(TICK_LOOP_LAUNCH_NOTE, new Error('stepIndexRange exploded'));
+
+    expect(built.read(LoopState).phase).toBe('idle'); // recovered, as before
+    expect(built.read(KernelErrorState).message).toContain('stepIndexRange exploded');
+    expect(built.read(WiringDefectState).message).toBeNull(); // developer surface untouched
+  });
+
+  it('a non-Error unknown still normalizes via String(error) onto KernelErrorState (regression check)', () => {
+    const buffer = new BufferBuilder();
+    buffer.allocate(LoopState);
+    buffer.allocate(WiringDefectState);
+    const built = buffer.build();
+    const sink = loopFaultSink(() => built);
+
+    sink('Circuit.Settings.setSpeed', 'a thrown string, not an Error');
+
+    expect(built.read(KernelErrorState).message).toContain('a thrown string, not an Error');
+    expect(built.read(WiringDefectState).message).toBeNull();
+  });
 });
 
 describe('Circuit.Sim.play / pause — the divert loop', () => {
@@ -125,14 +177,14 @@ describe('Circuit.Sim.play / pause — the divert loop', () => {
     await sleep(150);
     await kernel.call(SimPort.pause);
     // pause only drops the phase to 'stopping' synchronously — there is a lag
-    // until the loop itself notices at the next lap's gate and settles on
+    // until the loop itself notices at the next lap's switch and settles on
     // 'idle' (the sleep(100) window below).
     expect(kernel.buffer.read(LoopState).phase).toBe('stopping');
 
     const generationAtPause = kernel.buffer.read(GridState).generation;
     expect(generationAtPause).toBeGreaterThanOrEqual(3); // definitely spun a few laps
 
-    await sleep(100); // wait for the in-flight lap to reach the gate and exit
+    await sleep(100); // wait for the in-flight lap to reach the switch and exit
     expect(kernel.buffer.read(LoopState).phase).toBe('idle'); // settled from 'stopping'
     const settled = kernel.buffer.read(GridState).generation;
     await sleep(150);

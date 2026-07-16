@@ -11,13 +11,14 @@
 //
 // `.spawn` (play.ts's detached-fork pattern) would run the branch OFF the bus,
 // unawaited: two rapid steps would then race concurrent laps writing
-// GridState in parallel, because `idlePhaseGate` (inside stepOncePipeFor)
-// only aborts while `LoopState.phase !== 'idle'`, and stepOnce never sets
-// phase to anything else — nothing else would stop the second lap from
-// starting before the first finishes. The generation loop IS `.spawn`ed
-// because it is a single long-lived daemon guarded by `launchArm`'s
-// double-start gate; `step` is a one-shot lap with no such guard, so
-// serialization must come from the bus itself, not from the launch verb.
+// GridState in parallel, because `idlePhaseGate` (guard:loop.idle, guarding
+// `Circuit.Sim.step` — circuit/sim/idlePhase.gate.ts) only aborts while
+// `LoopState.phase !== 'idle'`, and stepOnce never sets phase to anything
+// else — nothing else would stop the second lap from starting before the
+// first finishes. The generation loop IS `.spawn`ed because it is a single
+// long-lived daemon guarded by `launchArm`'s double-start gate; `step` is a
+// one-shot lap with no such guard, so serialization must come from the bus
+// itself, not from the launch verb.
 //
 // This switch's calling stage below is stepOnce's one real external
 // referrer — the graph edge that resolves stepOnce's former orphanEntry (see
@@ -32,9 +33,11 @@ import { CircuitSimKeys } from './wiringKeys';
  * specific one-lap pipe (`stepOncePipeFor`). Declares `divertsTo:
  * [CircuitSimKeys.stepOnce]` — the graph edge that resolves stepOnce's former
  * orphanEntry. The idle-phase gate (the "never step while running" invariant)
- * lives INSIDE stepOncePipeFor's own entry stage (idlePhase.switch.ts via
- * appendGeneration), so it runs AFTER this divert — it is not duplicated
- * here.
+ * now runs as a framework gate guarding `Circuit.Sim.step` itself
+ * (circuit/sim/idlePhase.gate.ts, bound in driver/wiring.ts's `bindGuards`) —
+ * BEFORE this divert, and therefore before `stepGranularitySwitch` even
+ * computes/looks up the size/granularity-specific pipe (intentional and
+ * strictly cheaper than the old post-divert placement).
  */
 export const stepPipe: Pipe<void, void> = pipeline(
   {

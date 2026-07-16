@@ -131,3 +131,15 @@ export const StatsState = defineState<Stats>('StatsState', {
   births: 0,
   deaths: 0,
 });
+
+/** Same shape as the framework's KernelErrorValue — the two cells are twins
+ *  split by audience (developer vs end user). */
+export interface WiringDefect {
+  readonly message: string | null;
+}
+
+/** The developer-facing twin of KernelErrorState: miswired (KernelError) faults
+ *  land here, domain failures there. This app deliberately renders NO UI for
+ *  this cell — an app that wants a visible surface for kernelee-origin wiring
+ *  defects reads this cell. */
+export const WiringDefectState = defineState<WiringDefect>('WiringDefectState', { message: null });

@@ -6,10 +6,11 @@
 // the real repository.
 //
 // projectWiring uses the same expression as main.tsx's bridge send
-// (projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds)), but
-// injects memoryStorage() rather than the production window.localStorage into
-// the makeKernel that yields boundSymbolIds/flowCatalog — it assembles a
-// hermetic, throwaway kernel that never touches real I/O just to read those.
+// (projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds, guardCatalog)),
+// but injects memoryStorage() rather than the production window.localStorage into
+// the makeKernel that yields boundSymbolIds/flowCatalog/guardCatalog — it
+// assembles a hermetic, throwaway kernel that never touches real I/O just to
+// read those.
 
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -31,8 +32,8 @@ export default {
   catalogFunction: 'buildWiringCatalog',
   stateFiles: [resolve(repoRoot, 'src/contract/states.ts')],
   projectWiring: () => {
-    const { boundSymbolIds, flowCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
-    return projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds);
+    const { boundSymbolIds, flowCatalog, guardCatalog } = makeKernel({ settingsStore: makeSettingsStore(memoryStorage()) });
+    return projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds, guardCatalog);
   },
   // Detection (validateWiringGraph → unresolved) always runs. The ASSEMBLED-layer
   // allowlist (for post-assembly unresolved = the 2 orphanEntry only; the 4

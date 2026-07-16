@@ -36,7 +36,7 @@ const bridge: BridgeConnector | undefined = import.meta.env.DEV
   : undefined;
 
 // Only the composition root knows Infrastructure's runtime dependency (which storage).
-const { kernel, boundSymbolIds, flowCatalog } = makeKernel(
+const { kernel, boundSymbolIds, flowCatalog, guardCatalog } = makeKernel(
   { settingsStore: makeSettingsStore(window.localStorage) },
   bridge ? { onTrace: bridge.onTrace } : undefined,
 );
@@ -50,7 +50,7 @@ if (bridge) {
   // The catalog folds the flow-derived entries (builder.flowCatalog, carried
   // out of makeKernel) over the hand-built describePipe entries — see
   // mergeWiringCatalog's own doc comment for the dedupe/order rules.
-  bridge.sendCatalog(projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds));
+  bridge.sendCatalog(projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds, guardCatalog));
 }
 
 // Startup initialization (outside the view = the composition root, so calling

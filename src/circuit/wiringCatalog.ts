@@ -49,7 +49,7 @@ export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
       CircuitSimKeys.tickLoop,
       'Generation loop (tickLoop)',
       tickLoopPipeFor('chunk', DEFAULT_WIDTH, DEFAULT_HEIGHT),
-      'The generation loop body. gate → one generation → sleep → divert to the next lap. The target granularity is selected at runtime by granularity.switch.ts reading SimState.granularity (the locus of the value→branch causality). Never placed on dispatch; launched fire-and-forget via kernel.run.',
+      'The generation loop body. switch → one generation → sleep → divert to the next lap. The target granularity is selected at runtime by granularity.switch.ts reading SimState.granularity (the locus of the value→branch causality). Never placed on dispatch; launched fire-and-forget via kernel.run.',
     ),
     describePipe(
       CircuitSimKeys.stepOnce,
@@ -85,13 +85,13 @@ export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
       SimPort.strokeStart.id,
       'Stroke start (strokeStart)',
       strokeStartPipe,
-      'Interprets the drag start point. Arms the stroke state, gates outside-the-board, and diverts to toggleCell.',
+      'Interprets the drag start point. Arms the stroke state, filters outside-the-board, and diverts to toggleCell.',
     ),
     describePipe(
       SimPort.strokeMove.id,
       'Stroke move (strokeMove)',
       strokeMovePipe,
-      'Interprets drag-continuation moves. Gates outside-a-stroke (hover) and same-cell repeats, then diverts to toggleCell.',
+      'Interprets drag-continuation moves. Filters outside-a-stroke (hover) and same-cell repeats, then diverts to toggleCell.',
     ),
     describePipe(
       SettingsPort.setSpeed.id,

@@ -2,17 +2,24 @@
 //
 // Follows the saga / Switch / Emitter taxonomy.
 // The `+` of part files becomes a dot-suffix in TS (*.switch.ts / *.emitter.ts).
+// `*.gate.ts` is a deliberate NON-part suffix: a framework interceptor/gate
+// (declareGate/KernelBuilder.guard) declaration, bound in driver/wiring.ts's
+// bindGuards — it runs before its guarded port symbol's handler is even
+// invoked, so it has no stage-link chain and is invisible to the
+// switch/emitter/mutator part-file topology.
 //
-//   play.ts                    saga: arm the loop phase then .spawn the detached generation loop
+//   play.ts                    saga: minimal entry then .spawn the detached generation loop
 //                              (the detached-fork-branch launch; the visible edge to tickLoop)
-//   launchArm.switch.ts        Switch: the double-start guard (idle → launch fresh / else recover-only);
-//                              its LoopState write is a declared CI-floor exception (inseparable from the decision)
+//   launchArm.gate.ts          Gate: guard:loop.launchArm, the double-start guard (idle → launch
+//                              fresh / else recover-only), guarding Circuit.Sim.play; its LoopState
+//                              write is a declared CI-floor exception (inseparable from the decision)
 //   tickLoop.ts                saga: divert generation loop (+ tickLoopLauncherPipe, play's .spawn branch)
 //   step.ts                    saga: single-stage pipe that diverts into stepOnce (on-bus, awaited —
 //                              the visible edge to stepOnce; divert not spawn, so rapid clicks stay serialized)
+//   idlePhase.gate.ts          Gate: guard:loop.idle, guarding Circuit.Sim.step (abort unless idle)
 //   stepGranularity.switch.ts  Switch: translates the decision (granularity) into stepOnce's divert
 //                              target (one-shot, not a self-divert)
-//   stepOnce.ts                saga: one gated lap
+//   stepOnce.ts                saga: one lap (the idle-phase invariant runs as step's guarding gate)
 //   toggleCell.ts              saga: cell-flip transition (the GridState write is the declared
 //                              CI-floor exception for transitions inseparable from the
 //                              decision. StatsState lives in toggleCell.mutator.ts)
@@ -25,6 +32,8 @@
 //   generation.mutator.ts      Mutator: appendGeneration's paired GridState + StatsState emit
 //   branches/                  fork branch pipes (per granularity: chunk / row / cell)
 //   stroke.ts                  saga: stroke interpretation (symbol call + divert)
+//   inStroke.gate.ts           Gate: guard:stroke.active, guarding Circuit.Sim.strokeMove
+//                              (a move without a start aborts)
 //   stroke.mutator.ts          Mutator: armStrokeState (strokeStart's entry) / strokeEnd
 //   running.mutator.ts         Mutator: pause (a pure LoopState transition that calls no symbols;
 //                              play graduated to a saga when its launch became a .spawn)
