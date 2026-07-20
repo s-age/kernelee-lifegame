@@ -584,8 +584,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
 
   it('declares its own current coverage ceiling honestly (not an aspirational value)', () => {
     // v14: per-stage/per-gate abort/fail recovery via identifier resolution,
-    // replacing the retired endpoint-level EndpointEntry.emittableVerbs
-    // (card 3A46069E).
+    // replacing the retired endpoint-level EndpointEntry.emittableVerbs.
     expect(document.meta.schemaVersion).toBe(14);
     // The honest current reach on the TS side — symbol-usage coverage stops at
     // the lower bound of explicit-symbolId stages + static call-site scanning
@@ -723,7 +722,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // per identifier-resolved `abort`/`fail` call this ONE stage's own
     // handler (inline or named) contains. Every non-empty entry across the
     // whole app is `abort` with a real `desc` (no bare `fail(` anywhere, and
-    // every one of the 8 real abort sites was given a desc — card 3A46069E).
+    // every one of the 8 real abort sites was given a desc).
     const byKey = new Map(document.endpoints.map((e) => [e.key, e]));
     const emissionsOf = (key: string) =>
       allStages(byKey.get(key)!.stages).flatMap((s) => s.verbEmissions ?? []);
@@ -1014,15 +1013,15 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     //                       is the expected shape for "no vocabulary exists
     //                       at all", not a coverage gap; schema v12
     //                       suppresses the report in exactly this case.
-    // orphanEntry stays ZERO (dropped 1 → 0 in an earlier card): stepOnce,
-    // the last real orphan (card B004D425), was resolved the SAME structural
-    // way tickLoop's orphan was (card 4/4) — a distinct catalogued saga node
+    // orphanEntry stays ZERO (dropped 1 → 0 earlier): stepOnce,
+    // the last real orphan, was resolved the SAME structural
+    // way tickLoop's orphan was — a distinct catalogued saga node
     // reached by an external `divertsTo` edge from a calling stage — but with
     // a DIFFERENT verb: `step` reached `stepOnce` via `divert` (in-pipe,
     // on-bus, awaited by `kernel.run`), not play's detached `.spawn`, because
     // step's one-shot lap has no daemon guard of its own and must stay
     // serialized by the bus. `stepOnce` (and that divert) no longer exist at
-    // all: this card supersedes the whole hop with a symbol-composition edge
+    // all: the whole hop is superseded by a symbol-composition edge
     // into `Circuit.Sim.advanceGeneration` (`pipeline(symbol)`, step.ts) —
     // orphanEntry stays at zero for the new, structurally different reason
     // that `advanceGeneration` is directly BOUND (not merely divert-reached),
@@ -1106,7 +1105,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // regression signal).
     //
     // The 3 switches: runningPhase / cellVisit / loadedSettings — unaffected
-    // by this card (unchanged since the fork(symbol) card, FEA89296: see git
+    // by this change (unchanged since the fork(symbol) migration: see git
     // history for that migration's own reasoning). The 7 mutators: running
     // (pause only) / advanceGeneration (renamed from generation) / randomize /
     // toggleCell / stroke / simState / kernelError — also unaffected in count,

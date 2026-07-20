@@ -6,9 +6,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ## [0.3.0] - 2026-07-20
 
 ### Added
-- Adopted `fork(symbol)` dynamic fan-out for the generation loop (`Compute.Life.partitionRanges` / `stepIndexRange`); `tickLoop`/`stepOnce` collapse to fixed decisionless Bridge hops (card FEA89296).
-- Composed the generation sequence via port symbol (`Circuit.Sim.advanceGeneration`); retired `appendGeneration` and `stepOnce` (card F72F6310).
-- Composed the stroke pipes via Bridge divert (`strokeMove.bridge.ts`); retired `appendStrokeVisit` (card F72D450E).
+- Adopted `fork(symbol)` dynamic fan-out for the generation loop (`Compute.Life.partitionRanges` / `stepIndexRange`); `tickLoop`/`stepOnce` collapse to fixed decisionless Bridge hops.
+- Composed the generation sequence via port symbol (`Circuit.Sim.advanceGeneration`); retired `appendGeneration` and `stepOnce`.
+- Composed the stroke pipes via Bridge divert (`strokeMove.bridge.ts`); retired `appendStrokeVisit`.
 - Added `Circuit.Faults.clearError` + dismissible `ErrorBanner`.
 
 ### Changed

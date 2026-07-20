@@ -1,6 +1,6 @@
 // tests/traceDump.test.ts — pins the trace-dump harness's load-bearing
 // assumption in-memory (no disk I/O here; tests/traceDump.harness.ts is the
-// actual file-writing harness — see design card 69A1C1B8, task α): building the
+// actual file-writing harness): building the
 // kernel with `makeKernel(infra, {})` (tracing on, DEFAULT sink, no custom
 // onTrace) must populate the runtime `TraceState` buffer cell, with the
 // shape kernelee-mcp-tools' arch_monitor depends on

@@ -1,4 +1,4 @@
-// tests/traceDump.harness.ts — headless trace-dump harness (design card 69A1C1B8, task α).
+// tests/traceDump.harness.ts — headless trace-dump harness.
 //
 // Lives under tests/ (not scripts/) and is deliberately NOT named `*.test.ts`:
 // the kernelee-mcp-tools static scan excludes everything under a `tests/`
@@ -19,8 +19,8 @@
 // (`{ entries: TraceEntry[] }`) to a JSON file. That file is exactly what the
 // sibling tool `arch_monitor` (kernelee-mcp-tools) reads via its
 // `KERNEL_INTROSPECT_TRACE_PATH` env var — this script is the "expected" half
-// of the agent-closed verification loop card 69A1C1B8 sets up (arch_endpoint
-// = expected, arch_monitor = actual).
+// of the agent-closed verification loop (arch_endpoint = expected,
+// arch_monitor = actual).
 //
 // SCOPE — discrete, terminating actions only: `step` / `toggleCell` /
 // `randomize`. `play` is deliberately OUT OF SCOPE: it launches the tick loop

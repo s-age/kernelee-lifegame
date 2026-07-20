@@ -306,7 +306,7 @@ this just calls that; no new code is needed on the
   `play`/`step`/`advanceGeneration`/`randomize`/`toggleCell`/`strokeStart`/`strokeMove`/
   `setSpeed`/`setGranularity`/`hydrateSettings`) is sent exactly once right
   after startup. `tickLoop` and `advanceGeneration` are each a single
-  module-constant `Pipe` (card FEA89296, owner-decided 2026-07-18): granularity
+  module-constant `Pipe` (owner-decided 2026-07-18): granularity
   is read fresh from the buffer INSIDE `advanceGenerationPipe` on every lap
   (`Compute.Life.partitionRanges`), not baked into the pipe's own static
   shape at construction, so the former "fork branch count shown initially
