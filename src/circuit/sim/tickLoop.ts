@@ -1,22 +1,28 @@
-// circuit/sim/tickLoop.ts — tick loop saga.
+// circuit/sim/tickLoop.ts — tick loop saga (module constant).
 //
-// **divert**: a generation loop whose final tickLoopPipe stage diverts to the
-// next lap. divert is iteration, not recursion (swap in the stage sequence and
-// value, continue from index=0), so the stack stays O(1) no matter how many
-// tens of thousands of generations run. The jump target is chosen at runtime
-// from SimState.granularity — a granularity switch takes effect from the next
-// lap as "runtime selection of the divert target".
+// **divert**: a generation loop whose final stage diverts back into this
+// very pipe (self-divert reentry) via the typed `SimFlowKeys.tickLoop` key.
+// divert is iteration, not recursion (swap in the stage sequence and value,
+// continue from index 0), so the stack stays O(1) no matter how many tens of
+// thousands of generations run.
+//
+// Runtime *variability* (this app's other showcase primitive) now lives
+// entirely in `fork(symbol)`: advanceGenerationPipe's fork fans
+// `LifePort.stepIndexRange` out over a Compute-computed, runtime-sized range
+// list (`LifePort.partitionRanges`, reading SimState.granularity + the board
+// size on every lap) — so the self-divert itself is a FIXED, decisionless
+// hop (tickLoop.bridge.ts), not a choice among per-(granularity, board size)
+// pipe variants the way it used to be.
 //
 // The launch is a `.spawn` untracked fork branch in play.ts (play saga); the
-// detached branch play spawns is `tickLoopLauncherPipe` below.
+// detached branch play spawns diverts into this SAME typed key
+// (tickLoop.bridge.ts is shared by both call sites).
 
 import { pipeline, type Kernel, type Pipe } from '@s-age/kernelee';
-import { LoopState, SimState, type ForkGranularity } from '../../contract/states';
-import { cachedPipe } from './cache';
-import { appendGeneration } from './generation';
-import { granularitySwitch } from './granularity.switch';
+import { SimFlowKeys, SimPort } from '../../contract/ports';
+import { LoopState, SimState } from '../../contract/states';
 import { runningPhaseSwitch } from './runningPhase.switch';
-import { CircuitSimKeys } from './wiringKeys';
+import { tickLoopBridge } from './tickLoop.bridge';
 
 /**
  * Wait 1000 / genPerSec ms. Sliced into 50ms pieces, re-checking
@@ -34,45 +40,35 @@ async function sleepForSpeed(kernel: Kernel): Promise<void> {
   }
 }
 
-const tickLoopPipes = new Map<string, Pipe<void, void>>();
-
 /**
- * The generation loop body. switch → one generation → sleep → granularitySwitch
- * (divert to the next lap).
+ * The generation loop body — switch → one generation (referenced as the
+ * `Circuit.Sim.advanceGeneration` symbol; internally a fork(symbol) fan-out,
+ * runtime-sized) → sleep → bridge (self-divert reentry). A plain module
+ * constant: unlike the old per-(granularity, board size) variant pipes, this
+ * single `Pipe` value answers every lap regardless of granularity/board
+ * size — both are read at runtime INSIDE advanceGenerationPipe's own stages
+ * (the PartitionInput assembly stage in advanceGeneration.ts), not baked in
+ * at construction.
  *
- * The entry switch is a Switch part (runningPhase.switch.ts). The final stage is
- * also a Switch part (granularity.switch.ts) — it reads SimState.granularity
- * and diverts to the corresponding loop pipe. The divert target is decided at
- * runtime (StageDescriptor.divertsTo is the author's declaration of the
- * candidates), so a granularity switch takes effect from the next lap even
- * while running.
+ * The entry switch is a Switch part (runningPhase.switch.ts) — it decides
+ * AND self-terminates the loop (the aborting branch settles LoopState on
+ * idle, inseparably — a pre-handler gate could not express a decision that
+ * also self-terminates the pipe), so it stays an in-pipe stage, not a gate.
+ * The generation itself is composed via `.tap(SimPort.advanceGeneration)` —
+ * a mid-pipe symbol stage (through `kernel.invoke`, not the dispatch bus):
+ * the cursor stays void afterward, so the pipe continues on to sleep/divert.
+ * The final stage is a Bridge part (tickLoop.bridge.ts) — a fixed hop back
+ * into this very pipe, reused by play.ts's `.spawn` launcher for the loop's
+ * first lap.
  */
-export function tickLoopPipeFor(
-  granularity: ForkGranularity,
-  width: number,
-  height: number,
-): Pipe<void, void> {
-  return cachedPipe(tickLoopPipes, granularity, width, height, () =>
-    appendGeneration(
-      pipeline(
-        { note: 'Phase switch (abort unless running = natural stop, settling the phase on idle)' },
-        runningPhaseSwitch,
-      ),
-      granularity,
-      width,
-      height,
-    )
-      .effect(sleepForSpeed)
-      .pipe(
-        // Free-string divertsTo (kernelee's UNCHECKED tier), kept deliberately:
-        // the self-divert's target pipe is selected per lap from runtime buffer
-        // state (granularity AND board size), so it cannot be bound to one
-        // wiring-time key — see granularity.switch.ts's doc comment for the
-        // full reasoning. The stroke→toggle hop (stroke.ts) shows the typed
-        // tier this hop deliberately declines.
-        { note: 'Continue to the next generation (divert target selected at runtime by granularity)', divertsTo: [CircuitSimKeys.tickLoop] },
-        granularitySwitch,
-      )
-      .seal(),
-  );
-}
+export const tickLoopPipe: Pipe<void, void> = pipeline(
+  { note: 'running?' },
+  runningPhaseSwitch,
+)
+  .tap(SimPort.advanceGeneration)
+  .effect(sleepForSpeed)
+  .pipe(
+    { note: 'Continue to the next generation (self-divert reentry)', divertsTo: { tickLoop: SimFlowKeys.tickLoop } },
+    tickLoopBridge,
+  )
+  .seal();

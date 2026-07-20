@@ -28,7 +28,7 @@ import { applyToggleStats } from './toggleCell.mutator';
  * board back by racing the tick loop), the settled prev/next pair becomes the
  * cursor, and the stats are aggregated by Compute at the `.pipe(diffStats)`
  * stage. Also the divert target of the stroke saga (paired with
- * strokeVisitPipe's divertsTo declaration).
+ * strokeMovePipe's divertsTo declaration in stroke.ts).
  */
 export const togglePipe = pipeline(
   { note: 'Toggle write (copy-on-write atomically inside mutate) → assemble the transition pair' },

@@ -19,7 +19,10 @@
 // `Circuit.Sim.strokeMove` is a `portK<NormalizedPoint, void>` command whose
 // own description already promises "ignored unless a stroke is active".
 // `abort` from a gate always terminates the ENCLOSING flow; safe only because
-// `strokeMove` is never composed mid-pipe by another saga.
+// `strokeMove` is never composed mid-pipe by another saga. (strokeStart's
+// divert into the flow-bound strokeMovePipe does not count: a divert resolves
+// key → pipe directly, so this gate never runs on that path — and the state
+// was just armed by strokeStart itself, so the verdict would be allow anyway.)
 //
 // Passed as a bare identifier to `declareGate('guard:stroke.active', inStrokeGate)`
 // (a named handler with an address in the index's GateEntry.handler).
@@ -30,7 +33,7 @@ import { StrokeState } from '../../contract/states';
 
 /** Outside-a-stroke gate (a move without a start aborts). */
 export function inStrokeGate(kernel: Kernel, _point: NormalizedPoint) {
-  return kernel.buffer.read(StrokeState).active ? next() : abort(undefined);
+  return kernel.buffer.read(StrokeState).active ? next() : abort(undefined, 'no active stroke — ignored');
 }
 
 /** Guards `Circuit.Sim.strokeMove` — bound in driver/wiring.ts's `bindGuards`. */

@@ -16,5 +16,5 @@ import type { SimSettings } from '../../contract/ports';
 
 /** Missing or corrupt data keeps the defaults (abort — settings never block startup). */
 export function loadedSettingsSwitch(_kernel: Kernel, loaded: SimSettings | null) {
-  return loaded ? next(loaded) : abort(undefined);
+  return loaded ? next(loaded) : abort(undefined, 'missing or corrupt data — keep defaults');
 }

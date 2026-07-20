@@ -5,63 +5,65 @@
 // independently would mean fixing both every time a new root pipe is added.
 
 import { describePipe, type PipeDescriptorEntry } from '@s-age/kernelee';
-import { SettingsPort, SimPort } from '../contract/ports';
-import { DEFAULT_HEIGHT, DEFAULT_WIDTH } from '../contract/states';
+import { SettingsPort, SimFlowKeys, SimPort } from '../contract/ports';
+import { advanceGenerationPipe } from './sim/advanceGeneration';
 import { playPipe } from './sim/play';
 import { randomizePipe } from './sim/randomize';
 import { stepPipe } from './sim/step';
-import { stepOncePipeFor } from './sim/stepOnce';
 import { strokeMovePipe, strokeStartPipe } from './sim/stroke';
-import { tickLoopPipeFor } from './sim/tickLoop';
+import { tickLoopPipe } from './sim/tickLoop';
 import { togglePipe } from './sim/toggleCell';
-import { CircuitSimKeys } from './sim/wiringKeys';
 import { setGranularityPipe } from './settings/setGranularity';
 import { setSpeedPipe } from './settings/setSpeed';
 import { hydratePipe } from './settings/hydrateSettings';
 
 /**
  * Covers all 11 of lifegame's root pipes (independent dispatch/kernel.run entry
- * points). Only the `tickLoop`/`stepOnce` keys go via `CircuitSimKeys` — they
- * are unbound pipes launched directly by divert, so no corresponding
- * `KernelSymbol` exists. The other 9 reference the `KernelSymbol.id` of the
- * actually-bound `SimPort`/`SettingsPort` directly (no new hand-typed
- * constants — one more reference site never creates duplication). `play` and
- * `step` are both among them: since play's launch became a `.spawn` untracked
- * fork branch (play.ts) and step's launch became an in-pipe `divert` (step.ts),
- * both are catalogued saga endpoints. play's spawn edge to `tickLoop` resolves
- * that loop's former orphanEntry; step's divert edge to `stepOnce` resolves
- * stepOnce's former orphanEntry the same way — a real declared `divertsTo` edge,
- * not suppression (see scripts/wiringIssueAllowlist.ts).
+ * points). `tickLoop` is keyed via `SimFlowKeys.tickLoop.key` — like
+ * `toggleCell` and `strokeMove`, it is ALSO `flow()`-bound in
+ * driver/wiring.ts (see this file's own duplication note below), unlike the
+ * other 8 which have no divert-side binding at all and reference the
+ * `KernelSymbol.id` of the actually-bound `SimPort`/`SettingsPort` directly.
+ * `play` and `step` are both among the 8: since play's launch became a
+ * `.spawn` untracked fork branch (play.ts), it is a catalogued saga endpoint
+ * whose spawn edge to `tickLoop` resolves that loop's former orphanEntry (see
+ * scripts/wiringIssueAllowlist.ts). `step` composes the shared generation
+ * sequence as the `Circuit.Sim.advanceGeneration` symbol
+ * (`pipeline(symbol)`, step.ts) rather than diverting into a separate
+ * one-lap pipe — `advanceGeneration` is its own catalogued endpoint below,
+ * reached by BOTH `step` (symbol-entry) and `tickLoop` (`.tap`, mid-pipe) as
+ * symbol-composition edges, never divert edges.
  *
  * Every entry stays a SOURCE-VISIBLE `describePipe(...)` call in this one
- * function — including toggleCell, which is also `flow()`-bound in
- * driver/wiring.ts and therefore also appears in `builder.flowCatalog`. That
- * duplication is deliberate, not an oversight: kernelee-mcp-tools' static
- * scan attributes every per-endpoint fact (flows/wireSite/readsState/…) BY
- * CATALOG ORDER against the `describePipe` calls it finds in this function's
- * own body, so a flow-bound pipe removed from here would silently lose its
- * static half from the index. `mergeWiringCatalog` below is where the two
- * sources meet without double-cataloguing.
+ * function — including toggleCell/tickLoop/strokeMove, which are also
+ * `flow()`-bound in driver/wiring.ts and therefore also appear in
+ * `builder.flowCatalog`. That duplication is deliberate, not an oversight:
+ * kernelee-mcp-tools' static scan attributes every per-endpoint fact
+ * (flows/wireSite/readsState/…) BY CATALOG ORDER against the `describePipe`
+ * calls it finds in this function's own body, so a flow-bound pipe removed
+ * from here would silently lose its static half from the index.
+ * `mergeWiringCatalog` below is where the two sources meet without
+ * double-cataloguing.
  */
 export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
   return [
     describePipe(
-      CircuitSimKeys.tickLoop,
+      SimFlowKeys.tickLoop.key,
       'Generation loop (tickLoop)',
-      tickLoopPipeFor('chunk', DEFAULT_WIDTH, DEFAULT_HEIGHT),
-      'The generation loop body. switch → one generation → sleep → divert to the next lap. The target granularity is selected at runtime by granularity.switch.ts reading SimState.granularity (the locus of the value→branch causality). Never placed on dispatch; launched fire-and-forget via kernel.run.',
+      tickLoopPipe,
+      'The generation loop body. switch → one generation (Circuit.Sim.advanceGeneration, composed via .tap — a symbol-composition edge, not a divert) → sleep → divert back into this same pipe (self-divert reentry). Also the divert target of play\'s detached .spawn launcher.',
     ),
     describePipe(
-      CircuitSimKeys.stepOnce,
-      'Manual step (stepOnce)',
-      stepOncePipeFor('chunk', DEFAULT_WIDTH, DEFAULT_HEIGHT),
-      'Runs the same one generation as the loop body for a single lap, with no sleep/divert. Aborts at the entry gate unless LoopState.phase is idle (the invariant of never stepping while running). Reached by step\'s divert (its one real external referrer).',
+      SimPort.advanceGeneration.id,
+      'Advance one generation (advanceGeneration)',
+      advanceGenerationPipe,
+      'Advances the board exactly one generation: snapshot → Compute.Life.partitionRanges (reads SimState.granularity) → fork(symbol) over Compute.Life.stepIndexRange (runtime-sized) → Emitter join → fork (board line / Compute.Life.diffStats line) → pair-emits GridState + StatsState. A predefined process composed by tickLoop (.tap, mid-pipe) and step (pipeline(symbol), its whole pipe) as symbol-composition edges — not a command intended for dispatch, and never itself gated (see the file\'s own doc comment on verb containment).',
     ),
     describePipe(
       SimPort.step.id,
       'Manual step (step)',
       stepPipe,
-      'Diverts, on-bus, into the size/granularity-specific one-lap pipe (stepOnce) — the visible edge that resolves stepOnce\'s former orphanEntry. Unlike play\'s detached .spawn, this stays a `divert` awaited by kernel.run, so rapid Step clicks serialize instead of racing.',
+      'A single-stage pipe that IS the Circuit.Sim.advanceGeneration symbol (pipeline(symbol) — a symbol-composition edge, not a divert). Aborts at the entry gate unless LoopState.phase is idle (guard:loop.idle). Unlike play\'s detached .spawn, this stays on-bus and is `kernel.run`-awaited, so rapid Step clicks serialize instead of racing.',
     ),
     describePipe(
       SimPort.play.id,
@@ -85,13 +87,13 @@ export function buildWiringCatalog(): readonly PipeDescriptorEntry[] {
       SimPort.strokeStart.id,
       'Stroke start (strokeStart)',
       strokeStartPipe,
-      'Interprets the drag start point. Arms the stroke state, filters outside-the-board, and diverts to toggleCell.',
+      'Arms the stroke state, then diverts to Circuit.Sim.strokeMove — the start point is interpreted as the first move (hitCell resolution, off-board/same-cell filtering, and the toggleCell hop all live there).',
     ),
     describePipe(
       SimPort.strokeMove.id,
       'Stroke move (strokeMove)',
       strokeMovePipe,
-      'Interprets drag-continuation moves. Filters outside-a-stroke (hover) and same-cell repeats, then diverts to toggleCell.',
+      'Interprets drag-continuation moves. Filters outside-a-stroke (hover, via guard:stroke.active) and same-cell repeats, then diverts to toggleCell. Also the divert target of strokeStart — the start point is interpreted as the first move.',
     ),
     describePipe(
       SettingsPort.setSpeed.id,

@@ -4,12 +4,14 @@
 // Infrastructure implementations are never imported directly — always via
 // symbol (wiring lives in driver).
 // This is a **pure zero-logic catalog**: sagas (pipes) live in play.ts /
-// randomize.ts / toggleCell.ts / stroke.ts / stepOnce.ts / tickLoop.ts; pure
-// buffer transitions that call no symbols (Mutator parts) live in
-// running.mutator.ts (pause) and stroke.mutator.ts (strokeEnd).
+// randomize.ts / toggleCell.ts / stroke.ts / advanceGeneration.ts /
+// tickLoop.ts / step.ts; pure buffer transitions that call no symbols
+// (Mutator parts) live in running.mutator.ts (pause) and stroke.mutator.ts
+// (strokeEnd).
 // Settings live in an independent family (circuit/settings/ = Circuit.Settings).
 
 import { type SimDevice } from '../../contract/ports';
+import { advanceGeneration } from './advanceGeneration';
 import { play } from './play';
 import { randomize } from './randomize';
 import { pause } from './running.mutator';
@@ -27,4 +29,5 @@ export const simDevice: SimDevice = {
   strokeStart,
   strokeMove,
   strokeEnd,
+  advanceGeneration,
 };

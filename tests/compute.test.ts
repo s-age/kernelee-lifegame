@@ -2,7 +2,8 @@
 // compute is pure functions, so it is imported and tested directly (no kernel needed).
 
 import { describe, expect, it } from 'vitest';
-import { diffStats, hitCell, randomize, stepIndexRange } from '../src/compute/life';
+import { diffStats, hitCell, partitionRanges, randomize, stepIndexRange } from '../src/compute/life';
+import { CHUNK_COUNT, type ForkGranularity } from '../src/contract/states';
 
 /** Build a board from a coordinate list. */
 function fromCoords(width: number, height: number, coords: ReadonlyArray<readonly [number, number]>): Uint8Array {
@@ -122,6 +123,78 @@ describe('Compute.Life.stepIndexRange — equivalence with width-1 ranges (cell 
           full[y * width + x],
         );
       }
+    }
+  });
+});
+
+describe('Compute.Life.partitionRanges — payload-list partition (fork(symbol)\'s upstream)', () => {
+  const GRANULARITIES: readonly ForkGranularity[] = ['chunk', 'row', 'cell'];
+
+  /** Full coverage: sorted ranges concatenate to exactly [0, width*height) with no gap and no overlap. */
+  function assertFullNonOverlappingCoverage(
+    ranges: ReadonlyArray<{ readonly start: number; readonly end: number }>,
+    width: number,
+    height: number,
+  ): void {
+    const sorted = [...ranges].sort((a, b) => a.start - b.start);
+    let cursor = 0;
+    for (const { start, end } of sorted) {
+      expect(start).toBe(cursor); // no gap, no overlap
+      expect(end).toBeGreaterThanOrEqual(start);
+      cursor = end;
+    }
+    expect(cursor).toBe(width * height); // covers the whole board
+  }
+
+  for (const granularity of GRANULARITIES) {
+    it(`${granularity}: returns ≥1 payload, non-overlapping row-major ranges covering the whole board, sharing one cells reference`, () => {
+      const width = 6;
+      const height = 5;
+      const cells = randomize({ width, height, density: 0.4, seed: 3 });
+      const payloads = partitionRanges({ cells, width, height, granularity });
+
+      expect(payloads.length).toBeGreaterThanOrEqual(1);
+      // row-major order: the returned list itself is already sorted by start.
+      for (let i = 1; i < payloads.length; i++) {
+        expect(payloads[i]!.start).toBeGreaterThanOrEqual(payloads[i - 1]!.end);
+      }
+      assertFullNonOverlappingCoverage(payloads, width, height);
+      // Every payload is a complete StepIndexRangeInput, and cells is the SAME
+      // reference across every element (never copied).
+      for (const payload of payloads) {
+        expect(payload.cells).toBe(cells);
+        expect(payload.width).toBe(width);
+        expect(payload.height).toBe(height);
+      }
+    });
+  }
+
+  it('chunk: exactly CHUNK_COUNT payloads', () => {
+    const payloads = partitionRanges({ cells: new Uint8Array(6 * 5), width: 6, height: 5, granularity: 'chunk' });
+    expect(payloads).toHaveLength(CHUNK_COUNT);
+  });
+
+  it('row: exactly height payloads, one row each', () => {
+    const width = 6;
+    const height = 5;
+    const payloads = partitionRanges({ cells: new Uint8Array(width * height), width, height, granularity: 'row' });
+    expect(payloads).toHaveLength(height);
+    expect(payloads.every((p) => p.end - p.start === width)).toBe(true);
+  });
+
+  it('cell: exactly width*height payloads, one cell each', () => {
+    const width = 6;
+    const height = 5;
+    const payloads = partitionRanges({ cells: new Uint8Array(width * height), width, height, granularity: 'cell' });
+    expect(payloads).toHaveLength(width * height);
+    expect(payloads.every((p) => p.end - p.start === 1)).toBe(true);
+  });
+
+  it('a 1x1 board (the w,h ≥ 1 floor) still yields ≥1 payload covering the single cell, at every granularity', () => {
+    for (const granularity of GRANULARITIES) {
+      const payloads = partitionRanges({ cells: new Uint8Array(1), width: 1, height: 1, granularity });
+      expect(payloads.length).toBeGreaterThanOrEqual(1);
+      assertFullNonOverlappingCoverage(payloads, 1, 1);
     }
   });
 });

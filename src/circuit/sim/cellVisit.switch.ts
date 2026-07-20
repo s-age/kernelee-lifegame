@@ -32,8 +32,9 @@ type CellVisitDiverts = DivertChannel<{ toggle: typeof SimFlowKeys.toggleCell }>
 
 /**
  * Switch on outside-the-board / same-cell repeats → update stroke state → on
- * to the toggle. The final verb of the appendStrokeVisit shared stage
- * sequence (applies to both strokeStart and strokeMove).
+ * to the toggle. The final verb of `strokeMovePipe` (stroke.ts) — the shared
+ * visit-interpretation pipe both stroke entries reach (strokeMove by
+ * dispatch, strokeStart by divert through strokeMove.bridge.ts).
  *
  * The toggle hop rides the typed divert tier: `diverts.toggle(cell)` builds a
  * key-form diversion (`{ key: 'Circuit.Sim.toggleCell', payload: cell }`) the
@@ -43,9 +44,9 @@ type CellVisitDiverts = DivertChannel<{ toggle: typeof SimFlowKeys.toggleCell }>
  * pins `cell` to the key's `CellCoord` payload type.
  */
 export function cellVisitSwitch(kernel: Kernel, cell: CellCoord | null, diverts: CellVisitDiverts) {
-  if (!cell) return abort(undefined); // outside the board
+  if (!cell) return abort(undefined, 'outside the board');
   const last = kernel.buffer.read(StrokeState).last;
-  if (last && last.x === cell.x && last.y === cell.y) return abort(undefined); // suppress same-cell repeats
+  if (last && last.x === cell.x && last.y === cell.y) return abort(undefined, 'suppress same-cell repeats');
   kernel.buffer.mutate(StrokeState, (stroke) => ({ ...stroke, last: cell }));
   return diverts.toggle(cell);
 }

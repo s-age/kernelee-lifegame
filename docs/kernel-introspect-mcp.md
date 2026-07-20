@@ -110,7 +110,7 @@ states/sharedStages/parts.
     {
       "key": "Circuit.Sim.tickLoop",
       "kind": "divertTarget",
-      "noteFirstLine": "The generation loop body. gate → one generation → sleep → divert to the next lap. The target granularity is selected at runtime by granularity.switch.ts reading SimState.granularity (the locus of the value→branch causality). Never placed on dispatch; launched fire-and-forget via kernel.run."
+      "noteFirstLine": "The generation loop body. switch → one generation (fork(symbol) fan-out over Compute.Life.partitionRanges/stepIndexRange) → sleep → divert back into this same pipe (self-divert reentry). Also the divert target of play's detached .spawn launcher."
     }
     // ... 7 more entries omitted (9 in total)
   ],

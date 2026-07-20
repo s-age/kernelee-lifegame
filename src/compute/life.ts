@@ -5,10 +5,11 @@ import type {
   DiffStatsInput,
   CellCoord,
   HitCellInput,
+  PartitionInput,
   RandomizeInput,
   StepIndexRangeInput,
 } from '../contract/ports';
-import type { Stats } from '../contract/states';
+import { CHUNK_COUNT, type Stats } from '../contract/states';
 
 /**
  * Advance only the cells at row-major flat indices `start` (inclusive) to `end`
@@ -46,6 +47,46 @@ export function stepIndexRange({ cells, width, height, start, end }: StepIndexRa
     }
   }
   return out;
+}
+
+/** Half-open row-major flat index range `[start, end)`, in join order. */
+interface IndexRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Granularity → the list of ranges that partitions a w×h board (row-major
+ * flat indices). chunk = CHUNK_COUNT ranges aligned to row boundaries / row =
+ * one range per row / cell = one range per cell (the degenerate form of
+ * "cell = pipeline"). The value→count mapping is Compute-internal (the
+ * doctrine of intentional non-symbolization for Compute internals — only the
+ * Return DTO `partitionRanges` produces is contract-visible).
+ */
+function rowMajorRanges(width: number, height: number, granularity: PartitionInput['granularity']): readonly IndexRange[] {
+  switch (granularity) {
+    case 'chunk':
+      return Array.from({ length: CHUNK_COUNT }, (_, index) => ({
+        start: Math.floor((height * index) / CHUNK_COUNT) * width,
+        end: Math.floor((height * (index + 1)) / CHUNK_COUNT) * width,
+      }));
+    case 'row':
+      return Array.from({ length: height }, (_, y) => ({ start: y * width, end: (y + 1) * width }));
+    case 'cell':
+      return Array.from({ length: width * height }, (_, index) => ({ start: index, end: index + 1 }));
+  }
+}
+
+/**
+ * Partition a w×h board (w,h ≥ 1) into ≥1 complete `StepIndexRangeInput`
+ * payloads whose ranges are non-overlapping, row-major-ordered, and jointly
+ * cover the whole board — the payload shape `fork(LifePort.stepIndexRange)`
+ * fans out over, one call per element. `cells` is the same reference shared
+ * by every returned payload (never copied — `stepIndexRange` itself never
+ * mutates its input).
+ */
+export function partitionRanges({ cells, width, height, granularity }: PartitionInput): ReadonlyArray<StepIndexRangeInput> {
+  return rowMajorRanges(width, height, granularity).map(({ start, end }) => ({ cells, width, height, start, end }));
 }
 
 /**

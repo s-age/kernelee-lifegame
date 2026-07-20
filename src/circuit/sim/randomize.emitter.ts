@@ -1,7 +1,7 @@
 // circuit/sim/randomize.emitter.ts — Emitter part.
 //
 // An Emitter is "aggregation only". It is named after the pipeline that owns
-// the fork (randomizePipe). It has the same shape as generation.ts's
+// the fork (randomizePipe). It has the same shape as advanceGeneration.ts's
 // packGenerationResult (merely repacking the two-branch board-line / stats-line
 // fork into `{ cells, stats }`), but the owning pipeline differs, so per
 // the `<OwnerPipe>+Emitter` convention it gets its own file and name.

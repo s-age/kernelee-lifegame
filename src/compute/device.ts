@@ -5,10 +5,11 @@
 // is needed (the device type comes in via contract).
 
 import type { LifeDevice } from '../contract/ports';
-import { diffStats, hitCell, randomize, stepIndexRange } from './life';
+import { diffStats, hitCell, partitionRanges, randomize, stepIndexRange } from './life';
 
 export const lifeDevice: LifeDevice = {
   stepIndexRange,
+  partitionRanges,
   randomize,
   hitCell,
   diffStats,

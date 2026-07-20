@@ -6,7 +6,7 @@
 // even starts — see driver/wiring.ts's `bindGuards` — so `playPipe` itself
 // opens with a minimal entry stage and LAUNCHES the generation loop as an
 // UNTRACKED fork branch: a first-class `.spawn` stage on the wiring graph,
-// NOT the old `void kernel.run(tickLoopPipeFor(...)).catch(settleTickLoopFault)`
+// NOT the old `void kernel.run(the loop's own pipe).catch(settleTickLoopFault)`
 // escape.
 //
 // What the ORIGINAL migration (to `.spawn`) bought:
@@ -26,8 +26,8 @@
 // into `playPipe` (there is none today) could not accidentally bypass it.
 
 import { next, pipeline, type Kernel, type Pipe } from '@s-age/kernelee';
-import { granularitySwitch } from './granularity.switch';
-import { CircuitSimKeys } from './wiringKeys';
+import { SimFlowKeys } from '../../contract/ports';
+import { tickLoopBridge } from './tickLoop.bridge';
 
 /**
  * The `.spawn` stage's note — and, because kernelee derives a detached branch's
@@ -52,20 +52,20 @@ export const playPipe: Pipe<void, void> = pipeline(
   .spawn(
     { note: TICK_LOOP_LAUNCH_NOTE },
     // The detached launcher branch, inline at the spawn site: a one-stage pipe
-    // that raw-diverts into the size-specific generation loop — the same
-    // UNCHECKED size axis as the loop's own re-arm (granularity.switch.ts),
-    // reusing `granularitySwitch` (read granularity + board-size → `divert`
-    // into `tickLoopPipeFor`). It declares `divertsTo: [tickLoop]` so play's
-    // spawn edge to the loop is a visible graph edge — folding it gives
-    // tickLoop an EXTERNAL referrer (`play`), which is what resolves tickLoop's
-    // former orphanEntry. A loop failure propagates out of this branch's
-    // `runStages` to the `.spawn`'s errorSink (the composition root's
-    // `onError`: LoopState → idle + KernelErrorState); a self-diverting loop
-    // has no in-pipe fail-tail (it replaces its own stage list each lap), so
-    // the detached-branch boundary is the only place to catch it.
+    // that diverts into the generation loop via the decisionless
+    // tickLoop.bridge.ts (reused from the loop's own self-divert reentry — see
+    // that file's doc comment). It declares `divertsTo: { tickLoop:
+    // SimFlowKeys.tickLoop }` so play's spawn edge to the loop is a visible
+    // graph edge — folding it gives tickLoop an EXTERNAL referrer (`play`),
+    // which is what resolves tickLoop's former orphanEntry. A loop failure
+    // propagates out of this branch's `runStages` to the `.spawn`'s errorSink
+    // (the composition root's `onError`: LoopState → idle + KernelErrorState);
+    // a self-diverting loop has no in-pipe fail-tail (it replaces its own
+    // stage list each lap), so the detached-branch boundary is the only place
+    // to catch it.
     pipeline(
-      { note: 'Enter the generation loop (divert target selected at runtime by granularity)', divertsTo: [CircuitSimKeys.tickLoop] },
-      granularitySwitch,
+      { note: 'Enter the generation loop (fixed hop into tickLoop)', divertsTo: { tickLoop: SimFlowKeys.tickLoop } },
+      tickLoopBridge,
     ).seal(),
   )
   .seal();

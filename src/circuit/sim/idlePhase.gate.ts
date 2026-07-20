@@ -3,10 +3,10 @@
 // The decision is LoopState.phase; it holds no writes: a pure selects-only
 // gate (no exception needed). Migrated from a pipe-entry Switch to a
 // framework `declareGate`/`KernelBuilder.guard` pre-handler veto — this gate
-// now runs BEFORE `Circuit.Sim.step`'s granularity switch
-// (stepGranularity.switch.ts) even computes/looks up the per-(granularity,
-// size) pipe, which is intentional and strictly cheaper: the veto no longer
-// pays for a lookup it is going to discard.
+// now runs BEFORE `Circuit.Sim.step`'s one stage (the
+// `Circuit.Sim.advanceGeneration` symbol-composition edge, step.ts) is even
+// reached, which is intentional and strictly cheaper: the veto no longer
+// pays for a stage it is going to discard.
 //
 // **No longer a part file** — invisible to `*.switch.ts`'s stage-link
 // topology (see launchArm.gate.ts's own doc comment for the general
@@ -34,7 +34,7 @@ import { LoopState } from '../../contract/states';
  * not a load-bearing guard.
  */
 export function idlePhaseGate(kernel: Kernel, _payload: void) {
-  return kernel.buffer.read(LoopState).phase !== 'idle' ? abort(undefined) : next();
+  return kernel.buffer.read(LoopState).phase !== 'idle' ? abort(undefined, 'not idle — step ignored') : next();
 }
 
 /** Guards `Circuit.Sim.step` — bound in driver/wiring.ts's `bindGuards`. */

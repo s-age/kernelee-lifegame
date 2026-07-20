@@ -1,22 +1,26 @@
 # kernelee-lifegame
 
 A showcase app for the [kernelee](https://github.com/s-age/kernelee) framework: Conway's Game of Life.
-It puts kernelee's two primitives front and center —
+It puts kernelee's two primitives front and center, with a deliberate division
+of labor between them —
 
-- **divert = the generation loop** — the final stage of `tickLoopPipe` diverts
-  to itself with `divert(diversion(tickLoopPipe, undefined))`. A divert is
-  iteration, not recursion (it swaps in a stage list and a value and continues
-  from index=0), so running tens of thousands of generations stays O(1) on the
-  stack.
-- **fork = parallel computation over row chunks** — a board snapshot fans out
-  to N branches, which are collected in order and joined into a single board by
-  `.map` (an Emitter that only aggregates). The split granularity has three
-  levels (`SimState.granularity`): **chunk** (4 row chunks) / **row** (one
-  branch per row) / **cell** (one branch per cell — the degenerate form of
-  "cell = pipeline"). The Fork selector in the UI can switch granularity while
-  the simulation is running, so you can feel the trade-off between granularity
-  and overhead. The switch takes effect from the next generation, as a
-  **runtime selection of the divert target** in the tick loop's final stage.
+- **divert = self-repetition, O(1) stack** — the final stage of `tickLoopPipe`
+  diverts back to itself (a fixed, decisionless hop — see "fork is cooperative
+  concurrency" below). A divert is iteration, not recursion (it swaps in a
+  stage list and a value and continues from index=0), so running tens of
+  thousands of generations stays O(1) on the stack.
+- **fork = the runtime-*variable* axis** — `.fork(Compute.Life.stepIndexRange)`
+  fans a Compute-computed, runtime-sized range list out to that one symbol,
+  once per element, collected in order and joined into a single board by
+  `.map` (an Emitter that only aggregates). The range list itself comes from
+  `Compute.Life.partitionRanges`, read fresh every lap from
+  `SimState.granularity`: **chunk** (4 row chunks) / **row** (one range per
+  row) / **cell** (one range per cell — the degenerate form of "cell =
+  pipeline"). The Fork selector in the UI can switch granularity while the
+  simulation is running, so you can feel the trade-off between granularity and
+  overhead — the switch takes effect from the next generation, because the
+  range list is recomputed every lap regardless of where the (now fixed)
+  self-divert leads.
 
 The board engine lives in the Contract/Compute/Circuit rings and can be driven
 from tests without any UI. On top of it, `src/presentation/` implements a
@@ -49,15 +53,18 @@ src/
 │   ├── life.ts     stepIndexRange (B3/S23 over row-major flat index ranges) / hitCell / diffStats / randomize
 │   └── device.ts   lifeDevice (conforms to LifeDevice)
 ├── circuit/    # sagas — contract + kernelee only (compute is called via symbols)
-│   └── sim/        circuit taxonomy (saga / Switch / Emitter), 1 unit = 1 file
-│       ├── tickLoop.ts            saga: per-granularity divert loop + launch rules
-│       ├── stepOnce.ts            saga: one gated iteration
+│   └── sim/        circuit taxonomy (saga / Switch / Emitter / Bridge), 1 unit = 1 file
+│       ├── tickLoop.ts            saga: self-diverting generation loop (module constant)
+│       ├── tickLoop.bridge.ts     Bridge: fixed self-divert hop (reused by play's .spawn launcher)
+│       ├── step.ts                saga: one gated iteration — its one stage IS the
+│       │                          Circuit.Sim.advanceGeneration symbol (pipeline(symbol))
 │       ├── toggleCell.ts          saga: cell-flip transition (paired Stats emit)
-│       ├── granularity.switch.ts  Switch: translates a decision (granularity) into a divert target
-│       ├── generation.emitter.ts  Emitter: joins fork results into a single board
-│       ├── generation.ts          the shared stage list for one generation (both sagas append it)
-│       ├── branches/              fork branches (1 builder = rangeBranch × N ranges; granularity is just how the ranges are cut)
-│       ├── stroke.ts              stroke interpretation / cache.ts pipe memoization
+│       ├── advanceGeneration.emitter.ts  Emitter: joins fork(symbol) results into a single board
+│       ├── advanceGeneration.ts   the generation sequence, bound to its own port symbol
+│       │                          (Circuit.Sim.advanceGeneration) — referenced, not appended, by
+│       │                          tickLoop (.tap) and step (pipeline(symbol)) —
+│       │                          partitionRanges (symbol) → fork(stepIndexRange, symbol)
+│       ├── stroke.ts              stroke interpretation
 │       └── device.ts              simDevice catalog (maps port symbols to implementations)
 ├── infrastructure/ # I/O devices — depend only on contract (no kernelee; leaf handlers)
 │   └── settingsStore.ts  persists the settings JSON to localStorage (makeSettingsStore / memoryStorage)
@@ -89,53 +96,79 @@ saved.
 
 ## Tick loop design (src/circuit/sim/)
 
+`tickLoopPipe` is a single module constant (no more per-(granularity, board
+size) pipe variants) — granularity and board size are read fresh from the
+buffer every lap, inside the pipe's own stages:
+
 ```
-tickLoopPipeFor(granularity, width, height):
-  running gate (if false, abort = natural stop; lowers loopActive)
+tickLoopPipe:
+  runningPhase switch (abort unless running = natural stop, settles LoopState to idle)
   → take a board snapshot (buffer read)
-  → fork [branch 1..N] (rangeBranch × N; the ranges depend on granularity: chunk=CHUNK_COUNT branches /
-                          row=height branches / cell=width*height branches; declared via runtimeArity)
+  → assemble PartitionInput (granularity via buffer read)
+  → pipe (Compute.Life.partitionRanges — board+granularity → ≥1 complete range payloads)
+  → fork(symbol) (Compute.Life.stepIndexRange, fanned once per payload — N is a runtime value)
   → map (Emitter: order-preserving join, aggregation only — computing stats is a judgment, so it goes to the next stage)
   → pipe (Compute.Life.diffStats — the previous generation still lives in the buffer, pre-write)
   → effect (write to GridState + generation++, emit StatsState as a pair)
   → effect (sleep: 1000 / genPerSec ms, in 50ms slices so pause reacts promptly)
-  → divert (read SimState.granularity and select the next iteration's loop pipe at runtime —
-            if the granularity is unchanged, the cache returns the identical instance, making it a self-divert)
+  → bridge (a fixed, decisionless hop back into this same tickLoopPipe — the self-divert reentry)
 ```
 
-- **Launch rules**: `Circuit.Sim.play` sets `running=true` and, only if no loop
-  is active, launches `kernel.run(tickLoopPipe)` fire-and-forget (errors go to
-  `KernelErrorState`). **Never put the loop on dispatch (the serial
-  CommandBus)** — the bus would be blocked forever. The double-launch guard is
-  a separate piece of internal state from `SimState.running`: `activeLoops`, a
-  WeakSet keyed by kernel.
-- **pause**: just sets `running=false`. The next iteration's gate aborts, the
-  loop stops naturally, and the gate lowers loopActive.
-- **step**: runs the same one-generation stage list as the loop body
-  (`appendGeneration`), exactly once, without gate / sleep / divert
-  (`stepOncePipeFor`). PipeBuilder is immutable, so the shared stage list is
-  kept DRY as a function that "appends the same tail to different preludes".
-- **Granularity and the pipe cache**: pipes are memoized keyed by
-  (granularity, width, height). Returning the same `Pipe` value for the same
-  key is what keeps the divert "self"-referential, and the 'cell' granularity
-  (width×height branches) defers construction until first requested. That the
-  fork's branch count varies per construction is declared to introspection via
-  `runtimeArity`.
-- **Resolving the self-reference**: the final stage's closure calls
-  `tickLoopPipeFor` at run time (after seal), so it never hits the TDZ — lazy
-  reference through a closure solves the definition-order problem. Granularity
-  switching is realized as this "runtime selection of the divert target"
-  (`StageDescriptor.divertsTo` is the author's declaration of the candidates).
+- **Launch rules**: `Circuit.Sim.play` arms `LoopState.phase` (via the
+  `guard:loop.launchArm` gate — idle → launch fresh / else recover-only, no
+  double start) and `.spawn`s the loop as a detached, untracked fork branch.
+  **Never put the loop on dispatch (the serial CommandBus)** — the bus would
+  be blocked forever.
+- **pause**: moves `LoopState.phase` to `'stopping'`. The next lap's
+  `runningPhase.switch.ts` reads that, locks the phase to `'idle'`, and
+  aborts — the loop stops naturally.
+- **step**: runs the same one-generation sequence as the loop body,
+  exactly once, no sleep, no self-divert. Unlike the loop, `stepPipe`'s ONE
+  stage simply IS the shared sequence's own port symbol
+  (`Circuit.Sim.advanceGeneration`, entered via `pipeline(symbol)`) — there
+  is no separate "step" pipe to hop into any more. tickLoop reaches the same
+  symbol mid-pipe instead, via `.tap(SimPort.advanceGeneration)` (stages
+  follow it: sleep, then the self-divert). Both forms compose through
+  `kernel.invoke` directly (not the dispatch bus), so no deadlock risk either
+  way — see `advanceGeneration.ts`'s own doc comment for the two-form
+  rationale.
+- **Granularity is a fork(symbol) input, not a pipe-selection axis**: before
+  this shape, pipes were memoized keyed by (granularity, width, height) so the
+  self-divert kept returning the identical instance. `fork(symbol)` replaced
+  that whole pattern — `tickLoopPipe` and `advanceGenerationPipe` are each
+  just one plain constant, and identity preservation for the self-divert is
+  free (a constant is always itself). Granularity now only decides HOW MANY
+  elements `Compute.Life.partitionRanges` hands to the fork, read fresh every
+  lap.
+- **The self-divert is a fixed hop**: `tickLoop.bridge.ts` is a decisionless
+  Bridge — it reads no state and just diverts back into `tickLoopPipe` via a
+  typed `DispatchKey` (`SimFlowKeys.tickLoop`), bound once at kernel-build
+  time (`builder.flow(...)`, driver/wiring.ts). The same bridge is reused by
+  `play`'s `.spawn` launcher for the loop's very first lap.
 
-## fork is cooperative concurrency (an honest note)
+## fork: two vocabularies (static vs dynamic)
 
-JS is single-threaded, so the N fork branches are **not true CPU
-parallelism**. It is cooperative concurrency via `Promise.all` — the point
-here is to demo fork's API shape (fan-out + order-preserving join, branch verb
-semantics); for actual performance you would need Workers (future scope).
-Also, kernelee's fork has the same fail-fast **outcome** as the Swift
-original, but sibling branches are not cancelled and run to completion in the
-background (see the kernelee README).
+`fork` has two shapes in kernelee, and this app now uses both, for different
+reasons:
+
+- **Static `fork(branches)`** — a FIXED, small set of distinct sub-pipes
+  decided at construction time (this app's example: the two-line
+  board-line/stats-line fork in `advanceGeneration.ts`, right after the
+  transition pair is assembled).
+- **Dynamic `fork(symbol)`** — the SAME one symbol fanned out over a
+  runtime-sized list (`.fork(Compute.Life.stepIndexRange)`, fed by
+  `Compute.Life.partitionRanges`). This is what the generation loop's
+  granularity axis uses: the range list's length varies by
+  `SimState.granularity` and board size, decided fresh every lap, not at pipe
+  construction time.
+
+Both share the same join semantics (order-preserving, `Promise.all`,
+fail-fast) — JS is single-threaded, so this is cooperative concurrency, **not
+true CPU parallelism**. The point here is to demo fork's API shape (fan-out +
+order-preserving join, branch verb semantics); for actual performance you
+would need Workers (future scope). kernelee's fork has the same fail-fast
+**outcome** as the Swift original, but sibling branches are not cancelled and
+run to completion in the background (see the kernelee README).
 
 ## UI (src/presentation/)
 
@@ -178,11 +211,12 @@ of a screenshot, an ASCII layout sketch:
   measurement and sent as `strokeStart/Move/End` — interpreting them into
   cell coordinates is `Compute.Life.hitCell`'s job, and drag detection and
   same-cell dedup live in the circuit's stroke state.
-- **Invariants are owned by the circuit**: double launch is guarded by
-  `activeLoops`, and stepping while running is blocked by the gate (abort) at
-  the entrance of `stepOncePipe`. `ControlBar`'s disabled handling is
-  decoration (rendering of state), not a load-bearing guard — if it falls off,
-  nothing breaks.
+- **Invariants are owned by the circuit**: double launch is guarded by the
+  `guard:loop.launchArm` gate on `LoopState`, and stepping while running is
+  blocked by the `guard:loop.idle` gate (abort) guarding `Circuit.Sim.step`
+  itself — before step's one stage (the `advanceGeneration` symbol) is even
+  reached. `ControlBar`'s disabled handling is decoration (rendering of
+  state), not a load-bearing guard — if it falls off, nothing breaks.
 - **Fork selector**: a `<select>` that merely dispatches
   `SimPort.setGranularity`. It stays enabled while running — the tick loop
   picks its divert target every iteration, so the switch takes effect from the
@@ -268,39 +302,59 @@ this just calls that; no new code is needed on the
   `onError` logs a `console.error` every time, so `main.tsx` overrides it).
 - The catalog sent to the panel (assembled by `buildWiringCatalog()` in
   `src/circuit/wiringCatalog.ts` via `describePipe`/`projectWiringGraph` — all
-  9 top-level pipes: `tickLoop`/`stepOnce` plus
-  `randomize`/`toggleCell`/`strokeStart`/`strokeMove`/`setSpeed`/
-  `setGranularity`/`hydrateSettings`) is sent exactly once right after
-  startup. `SimState.granularity` is assumed to be its default `'chunk'`
-  during construction, so for a user whose persisted granularity (via
-  `Circuit.Settings.setGranularity`) is anything other than `'chunk'`, the
-  fork branch count shown initially disagrees with the actual setting
-  (`dispatch` is fire-and-forget and cannot wait for hydrate to finish — a
-  known limitation). Only the `tickLoop`/`stepOnce` entries are keyed by
-  self-`divertsTo` strings that never appear in `boundSymbolIds`, so they are
-  shown as `kind: 'divertTarget'` (the other 7 entries are keyed by the
-  `KernelSymbol.id` of the actually bound `SimPort`/`SettingsPort`, hence
-  `kind: 'endpoint'`).
+  11 top-level pipes: `tickLoop` plus
+  `play`/`step`/`advanceGeneration`/`randomize`/`toggleCell`/`strokeStart`/`strokeMove`/
+  `setSpeed`/`setGranularity`/`hydrateSettings`) is sent exactly once right
+  after startup. `tickLoop` and `advanceGeneration` are each a single
+  module-constant `Pipe` (card FEA89296, owner-decided 2026-07-18): granularity
+  is read fresh from the buffer INSIDE `advanceGenerationPipe` on every lap
+  (`Compute.Life.partitionRanges`), not baked into the pipe's own static
+  shape at construction, so the former "fork branch count shown initially
+  disagrees with the persisted granularity" limitation no longer applies —
+  the catalog's static descriptor shows one `fork(symbol)` stage regardless
+  of granularity; the panel simply has no branch count to disagree about.
+  `tickLoop` is keyed by the typed `SimFlowKeys.tickLoop` dispatch key, which
+  never appears in `boundSymbolIds` (it is a divert-only target, not a bound
+  `portK` member), so it is shown as `kind: 'divertTarget'`. `advanceGeneration`
+  IS a bound `portK` member (`Circuit.Sim.advanceGeneration`) with its own
+  `describePipe` entry — a `kind: 'endpoint'`, like the other entries keyed
+  by the `KernelSymbol.id` of the actually bound `SimPort`/`SettingsPort` —
+  reached by tickLoop/step as a symbol-composition stage
+  (`.tap`/`pipeline(symbol)`), never a divert.
 
 ### CI validation of the wiring catalog (`validateWiringGraph`)
 
 `tests/wiringCatalog.test.ts` runs kernelee's `validateWiringGraph` against
 the catalog assembled by `buildWiringCatalog()` (shared with main.tsx) and
-pins two facts: `unresolvedDivertTarget` (a `divertsTo` pointing at a
-non-existent key) is zero, and `orphanEntry` (a divertTarget nobody
-references) is exactly the two known entries (`tickLoop`/`stepOnce`).
+pins `unresolvedDivertTarget` (a `divertsTo` pointing at a non-existent key)
+at zero.
 
-`tickLoop`/`stepOnce` remain orphans **permanently**, even with a complete
-catalog — both are pipes launched directly via `kernel.run` without ever
-being bound through `register`/`registerVerb`, and the only `divertsTo`
-declarations in the whole app are `tickLoop`'s own self-loop and the one in
-`stroke.ts` targeting `toggleCell`, so nothing ever points at these two. This
-is not a false positive from catalog incompleteness but a structural property
-of how these two pipes are launched, and `validateWiringGraph`'s orphan-key
-detection cannot dissolve it. That is why the CI expectation is a fixed
-two-entry allowlist rather than `toEqual([])` — if a future pipe is forgotten
-from the catalog or a `divertsTo` is typo'd, it surfaces immediately as a new
-issue outside the fixed list.
+`orphanEntry` (a divertTarget nobody references) is also zero. `tickLoop`
+used to be a permanent orphan — a pipe launched directly via `kernel.run`,
+never bound through `register`/`registerVerb` — but has since gained a real
+external `divertsTo` referrer: `play`'s detached `.spawn` launch diverts into
+it (see `src/circuit/wiringCatalog.ts`'s own header comment, and
+`scripts/wiringIssueAllowlist.ts`). A genuine graph edge, not suppression, so
+`validateWiringGraph`'s orphan-key detection has nothing left to flag.
+`stepOnce` — which used to be resolved the same way, via `step`'s in-pipe
+`divert` — no longer exists at all: the one-lap generation body it named is
+now `Circuit.Sim.advanceGeneration`, a directly BOUND `portK` member with its
+own `describePipe` entry, so orphan status was never even a question for it
+(an endpoint whose own bound symbol id is its catalog key needs no external
+referrer to avoid being an orphan — the same shape as `play`/`randomize`/
+`toggleCell`).
+
+The RAW layer's CI expectation is instead a fixed, non-empty allowlist: the 3
+`unlistedBoundSymbol` entries in `RAW_WIRING_ISSUE_ALLOWLIST`
+(`Circuit.Sim.pause` / `Circuit.Sim.strokeEnd` / `Circuit.Faults.clearError`)
+— bound `portK` members with no `describePipe` twin of their own, promoted to
+command endpoints by `kernelee-mcp-tools`' scan. That is why the RAW CI
+expectation is that fixed allowlist rather than `toEqual([])`: a future pipe
+forgotten from the catalog, a typo'd `divertsTo`, or a promotion regression
+surfaces immediately as a new issue outside the fixed list. The ASSEMBLED
+layer (post `runIntrospect`, used by `scripts/introspect.config.ts` /
+`tests/introspectIndex.test.ts`) subtracts those same 3 promoted entries from
+RAW and is therefore empty.
 
 ## License
 

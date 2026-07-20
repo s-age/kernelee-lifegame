@@ -2,9 +2,9 @@
 //
 // Collects the StrokeState Mutators in one file (the same style as
 // running.mutator.ts collecting play/pause on the LoopState.phase transition
-// axis). stroke.ts keeps appendStrokeVisit / strokeStartPipe / strokeMovePipe
-// (pipe assembly, the symbol-calling sagas), while the two that are pure buffer
-// transitions calling no symbols live here:
+// axis). stroke.ts keeps strokeStartPipe / strokeMovePipe (pipe assembly, the
+// symbol-calling sagas), while the two that are pure buffer transitions
+// calling no symbols live here:
 //
 //   armStrokeState  the **entry** of strokeStartPipe (a bare identifier, so as
 //                   a named handler at the entry position it has an address in

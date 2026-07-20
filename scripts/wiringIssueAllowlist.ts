@@ -28,14 +28,15 @@
 import type { WiringIssueAllowlistEntry } from '@s-age/kernelee-mcp-tools';
 
 /**
- * The 2 entries that scanCommandEndpoints promotes to command endpoints, which
+ * The 3 entries that scanCommandEndpoints promotes to command endpoints, which
  * disappear from the post-assembly unresolved. They appear as
  * unlistedBoundSymbol in the raw validateWiringGraph, but assembleIndex
  * suppresses them in exchange for the promotion. This is the only difference
  * between RAW and ASSEMBLED, and the single explanation of "why the two layers
- * have different counts". pause/strokeEnd are bound portK members with no
- * corresponding describePipe (the Mutator in running.mutator.ts / the
- * strokeEnd Mutator).
+ * have different counts". pause/strokeEnd/clearError are bound portK members
+ * with no corresponding describePipe (the Mutator in running.mutator.ts / the
+ * strokeEnd Mutator / the clearError Mutator in
+ * circuit/faults/kernelError.mutator.ts).
  *
  * `play` and `step` are NO LONGER here: since play's launch became a `.spawn`
  * untracked fork branch (play.ts) and step's launch became an in-pipe
@@ -46,6 +47,7 @@ import type { WiringIssueAllowlistEntry } from '@s-age/kernelee-mcp-tools';
 const COMMAND_PROMOTED_UNLISTED: readonly WiringIssueAllowlistEntry[] = [
   { kind: 'unlistedBoundSymbol', key: 'Circuit.Sim.pause' },
   { kind: 'unlistedBoundSymbol', key: 'Circuit.Sim.strokeEnd' },
+  { kind: 'unlistedBoundSymbol', key: 'Circuit.Faults.clearError' },
 ];
 
 /**
@@ -53,22 +55,24 @@ const COMMAND_PROMOTED_UNLISTED: readonly WiringIssueAllowlistEntry[] = [
  * For `tests/wiringCatalog.test.ts` only.
  */
 export const RAW_WIRING_ISSUE_ALLOWLIST: readonly WiringIssueAllowlistEntry[] = [
-  // stepOnce is NO LONGER an orphan: `step` now launches it through an in-pipe
-  // `divert` whose calling stage declares `divertsTo: [stepOnce]` (step.ts),
-  // so the fold gives stepOnce an EXTERNAL referrer (`Circuit.Sim.step`) — a
-  // real declared edge, resolved the same honest way tickLoop's orphan was
-  // resolved (play → tickLoop): the orphan check is unchanged; the topology
-  // genuinely gained an edge. Unlike play's `.spawn` (a detached, unawaited
-  // launch), step's referring verb is `divert` — in-pipe and on-bus, so
-  // `kernel.run` still awaits the whole lap and rapid Step clicks keep
-  // serializing (no concurrency-model change, only the graph edge).
+  // tickLoop is NOT an orphan: `play` launches it through a `.spawn`
+  // untracked fork branch whose launcher declares `divertsTo: [tickLoop]`,
+  // giving tickLoop an EXTERNAL referrer (`Circuit.Sim.play`) — a real
+  // declared edge.
   //
-  // tickLoop was resolved the same way earlier: `play` launches it through a
-  // `.spawn` untracked fork branch whose launcher declares
-  // `divertsTo: [tickLoop]`, giving tickLoop an EXTERNAL referrer
-  // (`Circuit.Sim.play`).
+  // stepOnce (and its former orphan-resolution story) no longer exists: the
+  // one-lap generation body it used to name is now `advanceGenerationPipe`
+  // (circuit/sim/advanceGeneration.ts), bound directly to its own port
+  // symbol (`Circuit.Sim.advanceGeneration`) and catalogued under that same
+  // id — like `play`/`randomize`/`toggleCell`, an endpoint whose OWN bound
+  // symbol id is its catalog key needs no external referrer to avoid being
+  // an orphan. `step` no longer diverts into a separate pipe at all: its one
+  // stage IS the `Circuit.Sim.advanceGeneration` symbol
+  // (`pipeline(symbol)`, step.ts) — a symbol-composition edge, not a divert,
+  // so there is no `divertsTo` entry (and no orphan question) to resolve for
+  // it any more.
   //
-  // The 2 entries that disappear post-assembly via promotion (they do appear in the raw layer).
+  // The 3 entries that disappear post-assembly via promotion (they do appear in the raw layer).
   ...COMMAND_PROMOTED_UNLISTED,
 ];
 

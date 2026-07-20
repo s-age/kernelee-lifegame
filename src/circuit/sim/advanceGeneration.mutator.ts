@@ -1,20 +1,20 @@
-// circuit/sim/generation.mutator.ts — Mutator part.
+// circuit/sim/advanceGeneration.mutator.ts — Mutator part.
 //
 // A Mutator is "a node whose purpose is writing to buffers" — besides plain
 // command handlers (play/pause in running.mutator.ts), write effects inside
-// pipes are extracted here too. The tail `.effect` of appendGeneration
-// (generation.ts) calls no symbols and only writes GridState/StatsState — a
-// pure buffer transition — so it lives here as the bare identifier passed to
+// pipes are extracted here too. The tail `.effect` of advanceGenerationPipe
+// (advanceGeneration.ts) calls no symbols and only writes GridState/StatsState —
+// a pure buffer transition — so it lives here as the bare identifier passed to
 // `.effect(applyGenerationResult)`.
 //
-// A part's identity is (name, kind) — sharing the name "generation" with
-// generation.emitter.ts is not a collision; "owning pipeline + role
-// suffix" is what makes it unique (PartEntry carries kind/file alongside, and
-// the devtools panel also joins on the file key).
+// A part's identity is (name, kind) — sharing the name "advanceGeneration"
+// with advanceGeneration.emitter.ts is not a collision; "owning pipeline +
+// role suffix" is what makes it unique (PartEntry carries kind/file
+// alongside, and the devtools panel also joins on the file key).
 
 import type { Kernel } from '@s-age/kernelee';
 import { GridState, StatsState } from '../../contract/states';
-import type { GenerationResult } from './generation';
+import type { GenerationResult } from './advanceGeneration';
 
 /**
  * Copy-on-write: swap in the new cells array, advance the generation, and emit

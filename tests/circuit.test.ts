@@ -3,7 +3,7 @@
 
 import { BufferBuilder, KernelBuilder, KernelError, KernelErrorState } from '@s-age/kernelee';
 import { describe, expect, it, vi } from 'vitest';
-import { LifePort, SettingsPort, SettingsStorePort, SimPort, type LifeDevice } from '../src/contract/ports';
+import { FaultsPort, LifePort, SettingsPort, SettingsStorePort, SimPort, type LifeDevice } from '../src/contract/ports';
 import { GridState, LoopState, SimState, StatsState, StrokeState, WiringDefectState, type ForkGranularity } from '../src/contract/states';
 import { lifeDevice } from '../src/compute/device';
 import { settingsDevice } from '../src/circuit/settings';
@@ -390,7 +390,7 @@ describe('Circuit.Settings.setGranularity — fork granularity', () => {
     expect(alive).toEqual(expected);
   });
 
-  it('the loop keeps spinning after a granularity switch while running (runtime selection of the divert target)', async () => {
+  it('the loop keeps spinning after a granularity switch while running (runtime-sized fork(symbol) fan-out)', async () => {
     const kernel = makeTestKernel();
     await placeBlinker(kernel);
     await kernel.call(SettingsPort.setSpeed, 200); // 5ms/generation
@@ -400,7 +400,7 @@ describe('Circuit.Settings.setGranularity — fork granularity', () => {
     const beforeSwitch = kernel.buffer.read(GridState).generation;
     expect(beforeSwitch).toBeGreaterThanOrEqual(2);
 
-    await kernel.call(SettingsPort.setGranularity, 'row'); // diverts to the row loop from the next lap
+    await kernel.call(SettingsPort.setGranularity, 'row'); // the next lap's partitionRanges call fans out over row-sized ranges instead
     await sleep(80);
     const afterSwitch = kernel.buffer.read(GridState).generation;
     expect(afterSwitch).toBeGreaterThan(beforeSwitch); // generations keep advancing across the switch
@@ -487,5 +487,37 @@ describe('no-op writes keep the current reference (the flip side of copy-on-writ
     expect(kernel.buffer.read(SimState)).toBe(sim);
     await kernel.call(SettingsPort.setGranularity, sim.granularity);
     expect(kernel.buffer.read(SimState)).toBe(sim);
+  });
+});
+
+describe('Circuit.Faults.clearError', () => {
+  it('clears a seeded KernelErrorState message back to null', async () => {
+    const kernel = makeTestKernel();
+    kernel.buffer.mutate(KernelErrorState, () => ({ message: 'boom' }));
+    expect(kernel.buffer.read(KernelErrorState).message).toBe('boom');
+
+    await kernel.call(FaultsPort.clearError);
+
+    expect(kernel.buffer.read(KernelErrorState).message).toBeNull();
+  });
+
+  it('already null: the read reference is unchanged (no-op copy-on-write)', async () => {
+    const kernel = makeTestKernel();
+    const before = kernel.buffer.read(KernelErrorState);
+    expect(before.message).toBeNull();
+
+    await kernel.call(FaultsPort.clearError);
+
+    expect(kernel.buffer.read(KernelErrorState)).toBe(before);
+  });
+
+  it('does not touch WiringDefectState', async () => {
+    const kernel = makeTestKernel();
+    kernel.buffer.mutate(KernelErrorState, () => ({ message: 'boom' }));
+    const defectBefore = kernel.buffer.read(WiringDefectState);
+
+    await kernel.call(FaultsPort.clearError);
+
+    expect(kernel.buffer.read(WiringDefectState)).toBe(defectBefore);
   });
 });

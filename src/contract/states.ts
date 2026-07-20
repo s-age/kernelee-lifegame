@@ -28,7 +28,7 @@ export interface Grid {
   readonly width: number;
   readonly height: number;
   /**
-   * Generation counter (`++` in generation.ts, reset to `0` in randomize.ts).
+   * Generation counter (`++` in advanceGeneration.ts, reset to `0` in randomize.ts).
    * Recorded requirement, unimplemented: the static scan's `readsState`/
    * `writesState` resolve at state granularity (`"GridState"`) and do not
    * distinguish `cells`/`width`/`height`/`generation` — the lack of per-field

@@ -3,7 +3,7 @@
 
 import { KernelBuilder } from '@s-age/kernelee';
 import { describe, expect, it } from 'vitest';
-import { LifePort, SettingsPort, SettingsStorePort, SimPort } from '../src/contract/ports';
+import { FaultsPort, LifePort, SettingsPort, SettingsStorePort, SimPort } from '../src/contract/ports';
 import { GridState } from '../src/contract/states';
 import { makeKernel, wireAllDevices } from '../src/driver/wiring';
 import { makeSettingsStore, memoryStorage } from '../src/infrastructure/settingsStore';
@@ -24,6 +24,7 @@ describe('wireAllDevices', () => {
       ...symbolIds(LifePort),
       ...symbolIds(SimPort),
       ...symbolIds(SettingsPort),
+      ...symbolIds(FaultsPort),
       ...symbolIds(SettingsStorePort),
     ];
     expect(expected.length).toBeGreaterThan(0);

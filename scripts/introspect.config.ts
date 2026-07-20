@@ -36,12 +36,14 @@ export default {
     return projectWiringGraph(mergeWiringCatalog(flowCatalog), boundSymbolIds, guardCatalog);
   },
   // Detection (validateWiringGraph → unresolved) always runs. The ASSEMBLED-layer
-  // allowlist (for post-assembly unresolved = the 2 orphanEntry only; the 4
-  // promoted entries are not included) accepts the judgment that any unknown
-  // issue turns npm run introspect into a hard CI error ("detection = tool
-  // side, judgment = app side"). If the promotion regresses and
-  // play/pause/step/strokeEnd reappear, they are not in this allowlist, so it
-  // is an immediate hard error = the 4→0 reversal tripwire stays armed.
+  // allowlist is empty (RAW_WIRING_ISSUE_ALLOWLIST is exactly the 3
+  // COMMAND_PROMOTED_UNLISTED entries — pause/strokeEnd/clearError — and
+  // ASSEMBLED subtracts those same 3 from RAW, cancelling out to nothing), so
+  // any unknown issue turns npm run introspect into a hard CI error
+  // ("detection = tool side, judgment = app side"). If the promotion
+  // regresses and pause/strokeEnd/clearError reappear as unresolved, they are
+  // not in this (empty) allowlist, so it is an immediate hard error = the
+  // 3→0 reversal tripwire stays armed.
   failOnWiringIssues: true,
   wiringIssueAllowlist: ASSEMBLED_WIRING_ISSUE_ALLOWLIST,
   // offBufferControlValue comes from the static scan, a separate gate from the

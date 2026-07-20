@@ -18,7 +18,7 @@ const SPEED_MAX = 60;
  * Pause is disabled. This is decoration (rendering of state), not a
  * load-bearing guard — double starts are guarded by LoopState itself
  * (tickLoop's launch gate), and stepping while running/stopping by
- * stepOncePipe's entry gate (abort). Nothing breaks if disabled is removed.
+ * Circuit.Sim.step's own entry gate (abort). Nothing breaks if disabled is removed.
  */
 export function ControlBar(): ReactElement {
   const loop = useBuffer(LoopState);

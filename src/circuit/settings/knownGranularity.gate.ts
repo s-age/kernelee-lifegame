@@ -23,9 +23,9 @@
 // **No longer a part file** — invisible to `*.switch.ts`'s stage-link
 // topology (see circuit/sim/launchArm.gate.ts's own doc comment for the
 // general reasoning). `.gate.ts` is deliberate and non-part. Its decision and
-// family are both distinct from circuit/sim/granularity.switch.ts (the
-// self-divert Switch, unrelated and still a real part file) — the file stays
-// named `knownGranularity` to avoid confusion.
+// family are both distinct from circuit/sim/tickLoop.bridge.ts (the
+// self-divert Bridge, unrelated) — the file stays named `knownGranularity`
+// to avoid confusion.
 //
 // `abort(undefined)` here is the approved O=void bus-entry ignore contract:
 // `Circuit.Settings.setGranularity` is a `portK<ForkGranularity, void>`
@@ -42,7 +42,9 @@ import { type ForkGranularity } from '../../contract/states';
 
 /** Unknown-value gate (abort = ignore). Payload untouched — see file header. */
 export function knownGranularityGate(_kernel: Kernel, granularity: ForkGranularity) {
-  return granularity === 'chunk' || granularity === 'row' || granularity === 'cell' ? next() : abort(undefined);
+  return granularity === 'chunk' || granularity === 'row' || granularity === 'cell'
+    ? next()
+    : abort(undefined, 'unknown granularity value — ignored');
 }
 
 /** Guards `Circuit.Settings.setGranularity` — bound in driver/wiring.ts's `bindGuards`. */

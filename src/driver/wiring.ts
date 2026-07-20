@@ -1,9 +1,10 @@
 // driver/wiring.ts — the wiring manifest. The single place where every device is wired.
 
 import { BufferBuilder, KernelBuilder, KernelError, KernelErrorState, type Buffer, type GuardCatalogEntry, type Kernel, type PipeDescriptorEntry, type TraceSink } from '@s-age/kernelee';
-import { LifePort, SettingsPort, SettingsStorePort, SimFlowKeys, SimPort, type SettingsStoreDevice } from '../contract/ports';
+import { FaultsPort, LifePort, SettingsPort, SettingsStorePort, SimFlowKeys, SimPort, type SettingsStoreDevice } from '../contract/ports';
 import { GridState, LoopState, SimState, StatsState, StrokeState, WiringDefectState } from '../contract/states';
 import { lifeDevice } from '../compute/device';
+import { faultsDevice } from '../circuit/faults';
 import { settingsDevice } from '../circuit/settings';
 import { knownGranularityGateRef } from '../circuit/settings/knownGranularity.gate';
 import { simDevice } from '../circuit/sim';
@@ -11,6 +12,8 @@ import { idlePhaseGateRef } from '../circuit/sim/idlePhase.gate';
 import { inStrokeGateRef } from '../circuit/sim/inStroke.gate';
 import { launchArmGateRef } from '../circuit/sim/launchArm.gate';
 import { TICK_LOOP_LAUNCH_NOTE } from '../circuit/sim/play';
+import { strokeMovePipe } from '../circuit/sim/stroke';
+import { tickLoopPipe } from '../circuit/sim/tickLoop';
 import { togglePipe } from '../circuit/sim/toggleCell';
 
 /**
@@ -32,6 +35,7 @@ export function wireAllDevices(builder: KernelBuilder, infra: InfrastructureDevi
   LifePort.wire(lifeDevice, builder);
   SimPort.wire(simDevice, builder);
   SettingsPort.wire(settingsDevice, builder);
+  FaultsPort.wire(faultsDevice, builder);
   SettingsStorePort.wire(infra.settingsStore, builder);
 }
 
@@ -51,9 +55,15 @@ export function wireAllDevices(builder: KernelBuilder, infra: InfrastructureDevi
  * because kernelee-mcp-tools' static scan attributes per-endpoint facts by
  * the source-visible `describePipe` calls in `buildWiringCatalog`, in order).
  *
- * The tick loop's self-divert target is deliberately NOT bound here — its
- * pipe identity is runtime-parameterized (see granularity.switch.ts), so it
- * stays on the unchecked `diversion(pipe, payload)` tier.
+ * The tick loop's self-divert target is ALSO bound here (SimFlowKeys.tickLoop)
+ * — since fork(symbol) collapsed the loop pipe to a single module constant
+ * (circuit/sim/tickLoop.ts), its divert target is fixed, not
+ * runtime-parameterized, so there is no longer a free-string, type-free
+ * `diversion(pipe, payload)` case in this app. `step` no longer diverts
+ * anywhere — its hop into the generation sequence is a symbol-composition
+ * edge (`Circuit.Sim.advanceGeneration`, circuit/sim/advanceGeneration.ts /
+ * circuit/sim/step.ts), wired via ordinary `SimPort.wire` in
+ * `wireAllDevices` above, not via `flow()`.
  */
 export function bindFlows(builder: KernelBuilder): void {
   builder.flow(
@@ -61,6 +71,18 @@ export function bindFlows(builder: KernelBuilder): void {
     'Cell toggle (toggleCell)',
     togglePipe,
     'Toggles a single cell copy-on-write and pair-emits the transition stats. Also the divert target of the stroke saga.',
+  );
+  builder.flow(
+    SimFlowKeys.tickLoop,
+    'Generation loop (tickLoop)',
+    tickLoopPipe,
+    'The generation loop body. switch → one generation (Circuit.Sim.advanceGeneration, composed via .tap — a symbol-composition edge, not a divert) → sleep → divert back into this same pipe (self-divert reentry). Also the divert target of play\'s detached .spawn launcher.',
+  );
+  builder.flow(
+    SimFlowKeys.strokeMove,
+    'Stroke move (strokeMove)',
+    strokeMovePipe,
+    'Interprets drag-continuation moves. Filters outside-a-stroke (hover, via guard:stroke.active) and same-cell repeats, then diverts to toggleCell. Also the divert target of strokeStart — the start point is interpreted as the first move.',
   );
   // Guards ride along with flows here (not only from makeKernel below): a
   // caller that reproduces this repo's wiring by hand while substituting one

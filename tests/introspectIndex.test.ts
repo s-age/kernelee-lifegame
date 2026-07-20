@@ -5,7 +5,7 @@
 // validateWiringGraph). This file runs kernelee-mcp-tools' runIntrospect against
 // the real catalog (the same configuration as scripts/introspect.config.ts) and
 // verifies the assembled IndexDocument (the post-static-scan shape, including
-// inputType/drivenBy/readsState/writesState/emittableVerbs/states/unresolved) —
+// inputType/drivenBy/readsState/writesState/verbEmissions/states/unresolved) —
 // an exhaustiveness check that extends to "is anything that could not be
 // recovered being silently dropped?".
 
@@ -23,12 +23,12 @@ import { OFF_BUFFER_CONTROL_VALUE_ALLOWLIST } from '../scripts/offBufferControlV
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const srcRoot = join(repoRoot, 'src');
 
-/** Recursively enumerate `src/**\/*.switch.ts` and `src/**\/*.emitter.ts` (relative paths, posix separators). */
+/** Recursively enumerate `src/**\/*.switch.ts`, `src/**\/*.emitter.ts`, and `src/**\/*.bridge.ts` (relative paths, posix separators). */
 function partFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) return partFiles(path);
-    return /\.(switch|emitter)\.ts$/.test(entry.name) ? [relative(repoRoot, path).split('\\').join('/')] : [];
+    return /\.(switch|emitter|bridge)\.ts$/.test(entry.name) ? [relative(repoRoot, path).split('\\').join('/')] : [];
   });
 }
 
@@ -40,15 +40,17 @@ function allStages(stages: readonly StageEntry[]): StageEntry[] {
   ]);
 }
 
-/** The 2 `command`-kind endpoints — bound `portK` port members with no
+/** The 3 `command`-kind endpoints — bound `portK` port members with no
  * `describePipe`d `Pipe` behind them, so `stages: []`/`inputType: null` are
  * honest for these specifically, not the "forgot to write it" case the
  * 11-catalog-pipe floor below polices. (`play` graduated to a catalogued
  * `'endpoint'` when its launch became a `.spawn` untracked fork branch — see
  * play.ts / wiringCatalog.ts. `step` graduated the same way when its launch
  * became an in-pipe `divert` — see step.ts / wiringCatalog.ts. Neither is a
- * bare command any longer.) */
-const COMMAND_KEYS = ['Circuit.Sim.pause', 'Circuit.Sim.strokeEnd'];
+ * bare command any longer. `Circuit.Faults.clearError` is the third — a
+ * plain Mutator (circuit/faults/kernelError.mutator.ts) with no describePipe
+ * entry, the same shape as pause/strokeEnd.) */
+const COMMAND_KEYS = ['Circuit.Sim.pause', 'Circuit.Sim.strokeEnd', 'Circuit.Faults.clearError'];
 
 describe('runIntrospect against the real wiring catalog (index.json schema)', () => {
   let document: IndexDocument;
@@ -63,9 +65,9 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
   }, 15000); // full ts-morph scan — the default 10000ms is tight under load
 
   it('populates every required endpoint/stage/symbol field (no silent empty)', () => {
-    // The 11 describePipe catalog entries + the 2 command endpoints
-    // (pause/strokeEnd — first-class-tokenized drive sites).
-    expect(document.endpoints).toHaveLength(13);
+    // The 11 describePipe catalog entries + the 3 command endpoints
+    // (pause/strokeEnd/clearError — first-class-tokenized drive sites).
+    expect(document.endpoints).toHaveLength(14);
     for (const endpoint of document.endpoints) {
       const isCommand = endpoint.kind === 'command';
       expect(endpoint.key.length).toBeGreaterThan(0);
@@ -91,9 +93,6 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       if (isCommand) expect(endpoint.stages).toEqual([]);
       for (const stage of allStages(endpoint.stages)) {
         expect(stage.kind.length, `${endpoint.key}: stage with empty kind`).toBeGreaterThan(0);
-        if (stage.kind === 'fork(branches)') {
-          expect(stage.branchArity, `${endpoint.key}: fork stage without branchArity`).not.toBeNull();
-        }
       }
     }
     for (const symbol of document.symbols) {
@@ -105,14 +104,17 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
 
   it('classifies endpoint vs divertTarget vs command by boundSymbolIds/describePipe/portK, matching the known catalog shape', () => {
     const byKey = new Map(document.endpoints.map((e) => [e.key, e]));
-    // tickLoop/stepOnce are never bound and never dispatched directly — each
-    // is reached only by an external divert edge (play → tickLoop,
-    // step → stepOnce) — permanent divertTarget.
+    // tickLoop is never bound and never dispatched directly — it is reached
+    // only by an external divert edge (play → tickLoop) — permanent
+    // divertTarget. stepOnce no longer exists: the generation sequence it
+    // used to name is now `Circuit.Sim.advanceGeneration`, a directly BOUND
+    // portK member with its own describePipe entry — an ordinary 'endpoint',
+    // not a divertTarget (see below).
     expect(byKey.get('Circuit.Sim.tickLoop')?.kind).toBe('divertTarget');
-    expect(byKey.get('Circuit.Sim.stepOnce')?.kind).toBe('divertTarget');
     for (const key of [
       'Circuit.Sim.play', // catalogued saga endpoint (its launch is a .spawn)
-      'Circuit.Sim.step', // catalogued saga endpoint (its launch is a divert — see step.ts)
+      'Circuit.Sim.step', // catalogued saga endpoint (its one stage is the advanceGeneration symbol — see step.ts)
+      'Circuit.Sim.advanceGeneration', // catalogued saga endpoint (bound portK, referenced by tickLoop/step as a symbol — see advanceGeneration.ts)
       'Circuit.Sim.randomize',
       'Circuit.Sim.toggleCell',
       'Circuit.Sim.strokeStart',
@@ -123,41 +125,55 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     ]) {
       expect(byKey.get(key)?.kind, key).toBe('endpoint');
     }
-    // pause/strokeEnd: bound portK members with no describePipe entry —
+    // pause/strokeEnd/clearError: bound portK members with no describePipe entry —
     // a THIRD kind, neither 'endpoint' (needs a catalogued Pipe) nor 'divertTarget'.
     for (const key of COMMAND_KEYS) {
       expect(byKey.get(key)?.kind, key).toBe('command');
     }
   });
 
-  it('tickLoop is reached by play\'s .spawn divert edge; stepOnce is reached by step\'s divert edge (neither is run-launched any more)', () => {
+  it('tickLoop is reached by play\'s .spawn divert edge (never run-launched)', () => {
     const tickLoop = document.endpoints.find((e) => e.key === 'Circuit.Sim.tickLoop')!;
-    const stepOnce = document.endpoints.find((e) => e.key === 'Circuit.Sim.stepOnce')!;
 
     // tickLoop: divertTarget, reached by play's detached `.spawn` launcher,
-    // which raw-diverts into the size-specific loop. So its incoming edge is a
-    // DIVERT edge (divertedFrom includes the external referrer 'Circuit.Sim.play')
-    // — NOT a `kernel.run` launch (the old launchTickLoop is gone). That
-    // external referrer is exactly what resolves its former orphanEntry.
+    // which diverts into the (single, module-constant) loop pipe via the
+    // decisionless tickLoop.bridge.ts. So its incoming edge is a DIVERT edge
+    // (divertedFrom includes the external referrer 'Circuit.Sim.play') — NOT
+    // a `kernel.run` launch (the old launchTickLoop is gone). That external
+    // referrer is exactly what resolves its former orphanEntry. tickLoop is
+    // ALSO flow()-bound now (SimFlowKeys.tickLoop, like toggleCell) — but
+    // `kind` is driven by `boundSymbolIds` (portK members), not `flow()`-bound
+    // keys, so `kind` stays 'divertTarget' regardless.
     expect(tickLoop.kind).toBe('divertTarget');
     expect(tickLoop.divertedFrom).toContain('Circuit.Sim.play');
     expect(tickLoop.drivenBy).toEqual([]); // no drive site at all — reached ONLY by divert
-
-    // stepOnce: divertTarget, reached by step's in-pipe `divert`
-    // (stepGranularity.switch.ts's stepGranularitySwitch) — the SAME
-    // resolution shape as tickLoop (an external divertsTo referrer resolves a
-    // former orphanEntry), but a DIFFERENT verb than play's `.spawn`: a plain
-    // divert, on-bus, awaited by `kernel.run` from step's own one-line
-    // delegate (step.ts). The old direct
-    // `kernel.run(stepOncePipeFor(...))` launch that used to live in
-    // stepOnce.ts is gone, so stepOnce.drivenBy is now empty too, exactly
-    // mirroring tickLoop.
-    expect(stepOnce.kind).toBe('divertTarget');
-    expect(stepOnce.divertedFrom).toContain('Circuit.Sim.step');
-    expect(stepOnce.drivenBy).toEqual([]); // no run-launch edge remains — the graph edge is the divert
   });
 
-  it('every command endpoint (pause/strokeEnd) has a real drive site', () => {
+  it('advanceGeneration is reached by tickLoop/step as a SYMBOL-COMPOSITION edge — neither divert nor dispatch', () => {
+    // The one-lap generation body that used to be `Circuit.Sim.stepOnce`
+    // (reached by step's in-pipe `divert`) no longer exists as a separate
+    // pipe at all: the sequence is now `Circuit.Sim.advanceGeneration`
+    // (advanceGeneration.ts), a directly bound portK member with its own
+    // describePipe entry — an ordinary 'endpoint', reached by tickLoop
+    // (`.tap`, mid-pipe) and step (`pipeline(symbol)`, its whole pipe) as
+    // symbol-composition edges, through `kernel.invoke` — never a divert
+    // (divertedFrom stays empty) and never dispatched (its own port
+    // description says so explicitly; drivenBy stays empty too). This third
+    // reach path — "referenced as a symbol by another endpoint's own stage" —
+    // is recovered via `document.symbols[].usedByStagesOf`, the same field
+    // that already names diffStats' callers (see the shared-symbol test
+    // below), not via divertedFrom/drivenBy.
+    const advanceGeneration = document.endpoints.find((e) => e.key === 'Circuit.Sim.advanceGeneration')!;
+    expect(advanceGeneration.kind).toBe('endpoint');
+    expect(advanceGeneration.divertedFrom).toEqual([]);
+    expect(advanceGeneration.drivenBy).toEqual([]);
+
+    const symbol = document.symbols.find((s) => s.id === 'Circuit.Sim.advanceGeneration')!;
+    expect(symbol.bound).toBe(true);
+    expect(symbol.usedByStagesOf).toEqual(['Circuit.Sim.tickLoop', 'Circuit.Sim.step']);
+  });
+
+  it('every command endpoint (pause/strokeEnd/clearError) has a real drive site', () => {
     for (const key of COMMAND_KEYS) {
       const endpoint = document.endpoints.find((e) => e.key === key)!;
       expect(endpoint.drivenBy.length, `${key}: command endpoint with no drive site`).toBeGreaterThan(0);
@@ -165,24 +181,43 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     }
   });
 
-  it('every endpoint reachable only by direct dispatch (no divertedFrom) has a real drive site', () => {
+  it('every endpoint reachable only by direct dispatch or symbol composition (no divertedFrom) has a real reach path', () => {
+    // Two ways for a bound, non-divert 'endpoint' to be reached: dispatch
+    // (drivenBy) or being composed as a SYMBOL by another endpoint's own
+    // stage (`document.symbols[].usedByStagesOf` naming this endpoint's own
+    // key). `Circuit.Sim.advanceGeneration` is the one endpoint that takes
+    // the second path exclusively: its own port description says it is "not
+    // a command intended for dispatch", so drivenBy is legitimately empty —
+    // but tickLoop's `.tap` and step's `pipeline(symbol)` referencing it are
+    // still a real, recoverable reach path, just not one drivenBy/divertedFrom
+    // can name.
+    const symbolByKey = new Map(document.symbols.map((s) => [s.id, s]));
     for (const endpoint of document.endpoints) {
       if (endpoint.kind === 'endpoint' && endpoint.divertedFrom.length === 0) {
+        const reachedAsSymbol = (symbolByKey.get(endpoint.key)?.usedByStagesOf.length ?? 0) > 0;
         expect(
-          endpoint.drivenBy.length,
-          `${endpoint.key}: bound, non-divert endpoint with no drive site`,
-        ).toBeGreaterThan(0);
+          endpoint.drivenBy.length > 0 || reachedAsSymbol,
+          `${endpoint.key}: bound, non-divert endpoint with no drive site and no symbol-composition referrer`,
+        ).toBe(true);
       }
     }
   });
 
-  it('toggleCell: bound but in production only ever reached via strokeStart/strokeMove divert, never dispatched directly', () => {
+  it('toggleCell: bound but in production only ever reached via strokeMove divert, never dispatched directly', () => {
     // Also evidence that the cross-package drivenBy detection does not
     // over-detect — dispatch(SimActions.toggleCell(...)) does not actually
-    // exist anywhere, so drivenBy stays empty.
+    // exist anywhere, so drivenBy stays empty. strokeStart no longer diverts
+    // to toggleCell directly (owner-decided 2026-07-19): it hops into the
+    // shared strokeMovePipe instead (strokeMove.bridge.ts), and that pipe's
+    // own cellVisitSwitch is the only diverter into toggleCell now.
     const toggleCell = document.endpoints.find((e) => e.key === 'Circuit.Sim.toggleCell');
-    expect(toggleCell?.divertedFrom).toEqual(['Circuit.Sim.strokeStart', 'Circuit.Sim.strokeMove']);
+    expect(toggleCell?.divertedFrom).toEqual(['Circuit.Sim.strokeMove']);
     expect(toggleCell?.drivenBy).toEqual([]);
+
+    // strokeMove itself is now also a divert target — strokeStart's fixed
+    // hop into the shared visit-interpretation pipe (strokeMove.bridge.ts).
+    const strokeMove = document.endpoints.find((e) => e.key === 'Circuit.Sim.strokeMove');
+    expect(strokeMove?.divertedFrom).toEqual(['Circuit.Sim.strokeStart']);
   });
 
   it('never leaves a driveSite unattributed', () => {
@@ -222,10 +257,14 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         `${entry.kind}: ${entry.key}`,
       ).toBe(true);
     }
-    // The 4 promoted entries (play/pause/step/strokeEnd) no longer linger as
-    // unlistedBoundSymbol (positive evidence the suppression works — the 4→0
-    // reversal itself). They are not in the ASSEMBLED list either, so the exact
-    // match above already implies this, but state it explicitly.
+    // The currently-promoted entries (pause/strokeEnd/clearError — COMMAND_KEYS)
+    // no longer linger as unlistedBoundSymbol (positive evidence the
+    // suppression works). play/step graduated further still, out of the
+    // promotion mechanism entirely, into catalogued 'endpoint's with their own
+    // describePipe entry — so the historical count of "promoted at some point"
+    // was 4 (play/pause/step/strokeEnd), while COMMAND_KEYS today names only
+    // the 3 still relying on promotion. Neither set is in the ASSEMBLED list,
+    // so the exact match above already implies this, but state it explicitly.
     for (const key of COMMAND_KEYS) {
       expect(
         wiringGraphIssues.some((u) => u.kind === 'unlistedBoundSymbol' && u.detail.includes(`"${key}"`)),
@@ -254,7 +293,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(declared.has('KernelErrorState')).toBe(true);
   });
 
-  it('KernelErrorState is tokenized: origin:framework + declaration:null (not unresolved) / read (useKernelError) / write now a composition-root onError policy (unscanned)', () => {
+  it('KernelErrorState is tokenized: origin:framework + declaration:null (not unresolved) / read (useKernelError) / report stays a composition-root onError policy (unscanned), clear is a command+Mutator on the graph', () => {
     // Declaration: framework-injected (from kernelee's buffer.ts build()), so
     // there is no defineState site inside the app → declaration: null. Schema
     // v12: origin:'framework' makes this the EXPECTED shape for a
@@ -269,61 +308,68 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     ).toBe(false);
 
     // Read: ErrorBanner's useKernelError() shows up in readBy (a separate hook from useBuffer).
-    expect(kes.readBy.map((r) => r.site)).toEqual(['src/presentation/ErrorBanner.tsx:10']);
+    // The exact line shifts with ErrorBanner's own edits (dismiss button, useDispatch import) — re-pin from a real run, not by hand.
+    expect(kes.readBy.map((r) => r.site)).toEqual(['src/presentation/ErrorBanner.tsx:14']);
 
-    // Write: THE ARCHITECTURAL WIN of the detached-fork migration (card 4/4).
-    // The KernelErrorState write used to be app-pipe code — the hand-rolled
-    // `settleTickLoopFault` Mutator that `play`'s `void kernel.run(...).catch()`
-    // delegated to. Now that `play` launches the loop as a `.spawn` untracked
-    // fork branch, a branch fault routes to the framework errorSink, and the
-    // KernelErrorState write moved OUT of any pipe/command into the composition
-    // root's `onError` policy (driver/wiring.ts's `loopFaultSink`). That is
-    // framework-boundary infrastructure, not a catalogued pipe or command
-    // handler, so the static scan attributes it to no endpoint — the app no
-    // longer writes KernelErrorState from its own wiring graph at all.
+    // Write: the FAILURE report stays exactly where the detached-fork migration
+    // (card 4/4) left it. The KernelErrorState write used to be app-pipe code —
+    // the hand-rolled `settleTickLoopFault` Mutator that `play`'s
+    // `void kernel.run(...).catch()` delegated to. Now that `play` launches the
+    // loop as a `.spawn` untracked fork branch, a branch fault routes to the
+    // framework errorSink, and the REPORTING write lives in the composition
+    // root's `onError` policy (driver/wiring.ts's `loopFaultSink`) — framework-
+    // boundary infrastructure, not a catalogued pipe or command handler, so the
+    // static scan attributes no endpoint to it.
+    //
+    // CLEARING is a different operation with a different home: it is a
+    // display-driven APP action (Circuit.Faults.clearError), so it DOES land on
+    // the wiring graph — a command endpoint whose Mutator
+    // (circuit/faults/kernelError.mutator.ts) writes KernelErrorState. This is
+    // the one and only KernelErrorState write the app's own wiring graph now
+    // shows; the report itself is still invisible to it, as before.
     const kesWrites = document.endpoints.flatMap((e) =>
       e.writesState.filter((w) => w.state === 'KernelErrorState').map((w) => ({ key: e.key, ...w })),
     );
-    expect(kesWrites).toEqual([]); // no endpoint writes KernelErrorState anymore
+    expect(kesWrites).toEqual([
+      {
+        key: 'Circuit.Faults.clearError',
+        state: 'KernelErrorState',
+        site: 'src/circuit/faults/kernelError.mutator.ts:22',
+        attribution: 'function',
+        phase: 'command',
+        via: null,
+      },
+    ]);
+    // writtenBy is the presentation-write scan (the useKernel() escape hatch) —
+    // dismiss goes through dispatch, not a direct buffer.mutate from a view, so
+    // this stays [] unchanged.
     expect(kes.writtenBy).toEqual([]); // and no presentation write either
   });
 
   it('representative state-graph values hold: GridState/StatsState writers and presentation readers', () => {
-    // tickLoop/stepOnce are also GridState/StatsState writers — the write lives
-    // inside the shared helper appendGeneration's `.effect` (generation.ts),
-    // not directly under the endpoint's scope, but the static scan's helper
-    // following picks it up. The same 4 also match diffStats.usedByStagesOf
+    // advanceGeneration is the sole GridState/StatsState writer for the
+    // generation sequence now — its `.effect` lives directly under its OWN
+    // endpoint's scope (advanceGeneration.ts), not attributed transitively to
+    // tickLoop/step any more. Before this card, tickLoop and stepOnce each
+    // carried their OWN COPY of the appendGeneration stage sequence (a
+    // construction-time DRY function, not a graph edge), so the static scan
+    // found the write duplicated under BOTH endpoints. Now the sequence is
+    // ONE pipe bound to its own port symbol, and tickLoop/step reference it
+    // as a symbol-composition edge (`.tap`/`pipeline(symbol)`, through
+    // `kernel.invoke`) — the static scan's writesState attribution does not
+    // cross a symbol edge (a symbol stage's downstream effects belong to
+    // the SYMBOL's own endpoint, never folded back into the composing
+    // endpoint's writesState), so tickLoop/step's own writesState no longer
+    // include GridState/StatsState. This is a real topology change (the write
+    // has exactly one owning endpoint now), not an attribution regression —
+    // `Circuit.Sim.advanceGeneration` also matches diffStats.usedByStagesOf
     // (the shared-symbol test below).
-    //
-    // `play` ALSO appears — a consequence of the detached-fork migration
-    // (card 4/4). Its `.spawn` launcher (a closure reused from granularitySwitch)
-    // raw-diverts into `tickLoopPipeFor`, and the scan's helper-following walks
-    // that factory into the loop's own `appendGeneration` effect — the SAME
-    // helper-following that gives tickLoop its writes, now reaching play through
-    // its first-class launch stage (unlike the old `void kernel.run(...)` launch,
-    // which the command scan skip-boundaried). So play is a TRANSITIVE board
-    // writer: pressing Play does cause the board to evolve. This is honest
-    // richer attribution, not a hole. (A scanner skip-boundary for `.spawn`, à
-    // la `kernel.run`, would trim it — a kernelee-mcp-tools concern, out of
-    // this card's scope.)
-    //
-    // `step` ALSO appears — the stepOnce-orphan resolution (card B004D425).
-    // step.ts's `stepGranularitySwitch` diverts into `stepOncePipeFor`, and the
-    // same helper-following walks that call into `appendGeneration`'s effect,
-    // reaching step through its first-class divert stage. Unlike play's write
-    // (phase 'detached' — reached through an UNTRACKED `.spawn` branch that
-    // outlives the caller), step's write stays phase 'effect': a plain divert
-    // is followed IN-LINE within the same synchronous stage tree kernel.run
-    // awaits, so it is exactly as "own" a write as stepOnce's own.
     const gridWriters = new Set(
       document.endpoints.filter((e) => e.writesState.some((w) => w.state === 'GridState')).map((e) => e.key),
     );
     expect(gridWriters).toEqual(
       new Set([
-        'Circuit.Sim.play',
-        'Circuit.Sim.tickLoop',
-        'Circuit.Sim.step',
-        'Circuit.Sim.stepOnce',
+        'Circuit.Sim.advanceGeneration',
         'Circuit.Sim.randomize',
         'Circuit.Sim.toggleCell',
       ]),
@@ -334,41 +380,32 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     );
     expect(statsWriters).toEqual(
       new Set([
-        'Circuit.Sim.play',
-        'Circuit.Sim.tickLoop',
-        'Circuit.Sim.step',
-        'Circuit.Sim.stepOnce',
+        'Circuit.Sim.advanceGeneration',
         'Circuit.Sim.randomize',
         'Circuit.Sim.toggleCell',
       ]),
     );
 
-    // That write lives in appendGeneration's `.effect`, so the phase is
-    // 'effect' — for step too (a divert, unlike play's `.spawn`, never leaves
-    // the synchronous stage tree, so it never flips to 'detached').
-    for (const key of ['Circuit.Sim.tickLoop', 'Circuit.Sim.step', 'Circuit.Sim.stepOnce']) {
-      const endpoint = document.endpoints.find((e) => e.key === key)!;
-      expect(endpoint.writesState.find((w) => w.state === 'GridState')?.phase, key).toBe('effect');
-    }
+    // That write lives in advanceGenerationPipe's own tail `.effect`, so the
+    // phase is 'effect'.
+    const advanceGeneration = document.endpoints.find((e) => e.key === 'Circuit.Sim.advanceGeneration')!;
+    expect(advanceGeneration.writesState.find((w) => w.state === 'GridState')?.phase).toBe('effect');
 
-    // play's board writes, by contrast, are phase 'detached' (schemaVersion 10):
-    // they are reached THROUGH play's `.spawn` untracked branch (the launcher →
-    // tickLoopPipeFor → appendGeneration effect), which is fire-and-forget and
-    // OUTLIVES play — not play's own synchronous effect. The scanner phases them
-    // 'detached' (the honest WHEN, the same axis 'errorSink' adds for faults),
-    // not 'effect'. launchArmGate's own LoopState arm write is NO LONGER an
-    // endpoint-level writesState entry at all (schemaVersion 11, the gate
-    // migration): a gate runs before `Circuit.Sim.play`'s handler is even
-    // invoked, so it has no stage-tree presence — its write surfaces instead
-    // via `document.gates[].writesState` (phase 'gate'), verified in its own
-    // test below. Only the untracked subtree's runningPhaseSwitch write remains
-    // here.
+    // play/step's OWN writesState is empty — play's entry stage is a bare
+    // Bridge handler that calls no symbol and touches no buffer; step's one
+    // stage IS the advanceGeneration symbol, and (per the comment above) that
+    // downstream write belongs to advanceGeneration's own endpoint, not
+    // step's. launchArmGate's own LoopState arm write still surfaces via
+    // `document.gates[].writesState` (phase 'gate'), verified in its own test
+    // below — unaffected by this card. tickLoop's OWN runningPhaseSwitch write
+    // still shows with phase 'stage' (it is tickLoop's own top-level entry
+    // stage, unaffected by the symbol-composition change to its OTHER stage).
     const play = document.endpoints.find((e) => e.key === 'Circuit.Sim.play')!;
-    expect(play.writesState.find((w) => w.state === 'GridState')?.phase).toBe('detached');
-    expect(play.writesState.find((w) => w.state === 'StatsState')?.phase).toBe('detached');
-    expect(play.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase)).toEqual([
-      'detached', // the loop's runningPhaseSwitch write, reached through the branch
-    ]);
+    expect(play.writesState).toEqual([]);
+    const step = document.endpoints.find((e) => e.key === 'Circuit.Sim.step')!;
+    expect(step.writesState).toEqual([]);
+    const tickLoopOwn = document.endpoints.find((e) => e.key === 'Circuit.Sim.tickLoop')!;
+    expect(tickLoopOwn.writesState.filter((w) => w.state === 'LoopState').map((w) => w.phase)).toEqual(['stage']);
 
     const states = document.states ?? [];
     // states[].writtenBy records presentation-side observations — direct
@@ -455,20 +492,101 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
 
   it('a symbol shared by 2+ endpoints names all its real users (shared-stage analogue)', () => {
     const symbols = document.symbols;
+    // diffStats is called from exactly ONE place now (advanceGenerationPipe's
+    // own stats-line fork branch) — advanceGeneration replaces BOTH
+    // tickLoop and stepOnce in this list, because the generation sequence
+    // that calls it lives in exactly one endpoint's own stage tree now, not
+    // duplicated across two callers.
     const diffStats = symbols.find((s) => s.id === 'Compute.Life.diffStats');
     expect(diffStats?.usedByStagesOf).toEqual([
-      'Circuit.Sim.tickLoop',
-      'Circuit.Sim.stepOnce',
+      'Circuit.Sim.advanceGeneration',
       'Circuit.Sim.randomize',
       'Circuit.Sim.toggleCell',
     ]);
     const save = symbols.find((s) => s.id === 'Infrastructure.Settings.save');
     expect(save?.usedByStagesOf).toEqual(['Circuit.Settings.setSpeed', 'Circuit.Settings.setGranularity']);
+    // Circuit.Sim.advanceGeneration is ITSELF a shared symbol now — the first
+    // circuit-to-circuit symbol-composition edge in this app, called from
+    // both tickLoop (.tap) and step (pipeline(symbol)).
+    const advanceGeneration = symbols.find((s) => s.id === 'Circuit.Sim.advanceGeneration');
+    expect(advanceGeneration?.usedByStagesOf).toEqual(['Circuit.Sim.tickLoop', 'Circuit.Sim.step']);
     expect(symbols.every((s) => s.bound)).toBe(true);
   });
 
+  it('symbol-composition edges among endpoints form a DAG (cycles are the divert tier\'s exclusive job)', () => {
+    // Circuit ports can now compose OTHER circuit ports as ordinary stages
+    // (`.tap(sym)` / `.pipe(sym)` / `.fork(sym)`) — the same chokepoint
+    // (`kernel.invoke`) Compute/Infrastructure symbol stages already used.
+    // `Circuit.Sim.advanceGeneration`, referenced by tickLoop (`.tap`) and
+    // step (`pipeline(symbol)`), is the first live example. A
+    // symbol-composition edge is a STAGE, not a divert: kernelee's own
+    // iterative `runStages` gives O(1)-stack safety to a self-DIVERTING loop,
+    // but nothing gives that same guarantee to a symbol edge — two endpoints
+    // whose stages referenced each other's symbol would recurse through
+    // `kernel.invoke` at RUNTIME with no iteration trick to catch it. This
+    // floor is the static backstop: walk every endpoint's own stage tree,
+    // collect symbolId edges that target ANOTHER CATALOGUED ENDPOINT
+    // (Compute/Infrastructure symbols are leaves, never endpoints, so they
+    // can never appear as a cycle node here), and assert the resulting graph
+    // has no cycle — including a trivial self-loop. Divert edges
+    // (`divertsTo`/`divertedFrom`) are deliberately EXCLUDED from this graph:
+    // a cycle THERE is the whole point of a self-divert loop (tickLoop's own
+    // reentry), and the divert tier is what makes that safe — cycles are its
+    // exclusive job, never a symbol-composition edge's.
+    const endpointKeys = new Set(document.endpoints.map((e) => e.key));
+    const edges = new Map<string, Set<string>>();
+    for (const endpoint of document.endpoints) {
+      const targets = new Set<string>();
+      for (const stage of allStages(endpoint.stages)) {
+        if (stage.symbolId !== null && endpointKeys.has(stage.symbolId)) {
+          targets.add(stage.symbolId);
+        }
+      }
+      if (targets.size > 0) edges.set(endpoint.key, targets);
+    }
+
+    // Never let zero subjects make this floor vacuously true — the real
+    // topology must actually exercise it.
+    expect(edges.size).toBeGreaterThan(0);
+    expect(edges.get('Circuit.Sim.tickLoop')).toEqual(new Set(['Circuit.Sim.advanceGeneration']));
+    expect(edges.get('Circuit.Sim.step')).toEqual(new Set(['Circuit.Sim.advanceGeneration']));
+
+    const WHITE = 0;
+    const GRAY = 1;
+    const BLACK = 2;
+    const color = new Map<string, number>();
+    const path: string[] = [];
+    let cycleDescription: string | null = null;
+    const visit = (node: string): boolean => {
+      color.set(node, GRAY);
+      path.push(node);
+      for (const next of edges.get(node) ?? []) {
+        const state = color.get(next) ?? WHITE;
+        if (state === GRAY) {
+          cycleDescription = [...path, next].join(' -> ');
+          return true;
+        }
+        if (state === WHITE && visit(next)) return true;
+      }
+      path.pop();
+      color.set(node, BLACK);
+      return false;
+    };
+    let hasCycle = false;
+    for (const key of edges.keys()) {
+      if ((color.get(key) ?? WHITE) === WHITE && visit(key)) {
+        hasCycle = true;
+        break;
+      }
+    }
+    expect(hasCycle, `symbol-composition cycle detected: ${cycleDescription}`).toBe(false);
+  });
+
   it('declares its own current coverage ceiling honestly (not an aspirational value)', () => {
-    expect(document.meta.schemaVersion).toBe(12);
+    // v14: per-stage/per-gate abort/fail recovery via identifier resolution,
+    // replacing the retired endpoint-level EndpointEntry.emittableVerbs
+    // (card 3A46069E).
+    expect(document.meta.schemaVersion).toBe(14);
     // The honest current reach on the TS side — symbol-usage coverage stops at
     // the lower bound of explicit-symbolId stages + static call-site scanning
     // (not complete). It should flip to true only when coverage is actually
@@ -478,89 +596,88 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(document.meta.workingTreeHash).not.toBeNull();
   });
 
-  it('recovers the granularity value→branch mapping as data — one builder, three ranges', () => {
-    // The three branch builders are unified into the single `rangeBranch`, but
-    // **the table (BRANCH_FAMILIES) must stay**. Folding the table into a
-    // `switch` statement makes `valueSelectors` (the granularity value set),
-    // the fork's `branchSelector` correlation edge, and the branches'
-    // per-stage `flows` vanish from the index simultaneously — a silent hole
-    // that does not even show up as unresolved (the detector only reads the
-    // module-scope table + direct `TABLE[param](...)` return shape). "Unifying
-    // into one builder" and "dropping the table" are separate changes.
-    const selectors = document.valueSelectors ?? [];
-    const branchesFor = selectors.find((s) => s.functionName === 'branchesFor');
-    expect(branchesFor?.discriminantType).toBe('ForkGranularity');
-    expect(Object.keys(branchesFor?.cases ?? {}).sort()).toEqual(['cell', 'chunk', 'row']);
-    // Every case calls the same builder — the unification is pinned by this one line.
-    for (const caseText of Object.values(branchesFor?.cases ?? {})) {
-      expect(caseText).toContain('rangeBranch');
+  it('the granularity value→branch-count mapping sinks into Compute (intentionally non-symbolized) — valueSelectors/branchSelector are honestly empty', () => {
+    // Until fork(symbol), the granularity→branch-count table lived in
+    // circuit (circuit/sim's deleted branch-factory module) as a
+    // module-scope literal table + a function directly returning
+    // `TABLE[param](...)` — the one shape
+    // kernel-introspect tokenizes as `valueSelectors`, giving the fork a
+    // `branchSelector` correlation edge. fork(symbol) replaces that whole
+    // authoring pattern: the range list is now produced by a Compute symbol
+    // (LifePort.partitionRanges → compute/life.ts's `rowMajorRanges`, a plain
+    // `switch`, never a table), and Compute internals are DELIBERATELY
+    // non-symbolized (this app's own doctrine — only the port's Payload/Return
+    // DTO is contract-visible, never its internal branching). So the fact
+    // this test used to pin (a table-shaped selector reachable from a fork)
+    // no longer exists anywhere in this app — the two remaining
+    // `fork(branches)` stages (the board-line/stats-line two-line forks) are
+    // both fixed-arity, inline, with no chooser at all.
+    expect(document.valueSelectors ?? []).toEqual([]);
+    for (const endpoint of document.endpoints) {
+      for (const stage of allStages(endpoint.stages)) {
+        expect(stage.branchSelector, `${endpoint.key}: unexpected branchSelector`).toBeNull();
+      }
     }
   });
 
-  it('a runtime-arity fork always carries a branchSelector — the consumer floor, checked on the output side', () => {
-    // The test above checks "the table is readable"; this one checks "the table
-    // reaches the fork". Separate facts: folding the table into a switch drops
-    // both at once, but that is not the only way to break it (writing
-    // `.fork(Array.from(ranges, r => rangeBranch(r)))` directly involves no
-    // switch anywhere). There are endless ways to break it, so instead of a
-    // lint banning input shapes, look at the output fact directly.
-    //
-    // branchArity being runtime = the branch list is chosen per call by a
-    // "value". Then the chosen function must have a name. Fixed-arity forks
-    // (the stats line's `.fork(pipeline(…), pipeline(…))`) have no chooser and
-    // are out of scope.
-    const runtimeForks = document.endpoints.flatMap((endpoint) =>
-      allStages(endpoint.stages)
-        .filter((stage) => stage.kind === 'fork(branches)' && stage.branchArity?.kind === 'runtime')
-        .map((stage) => ({ key: endpoint.key, stage })),
-    );
-    expect(runtimeForks.length).toBeGreaterThan(0); // never let zero subjects make this vacuously true
-    for (const { key, stage } of runtimeForks) {
-      expect(stage.branchSelector?.functionName, `${key}: runtime arity fork without branchSelector`).toBe(
-        'branchesFor',
-      );
-    }
-    // The correlation edge's destination must exist (dangling would make "it has a name" a lie).
-    const sites = new Set((document.valueSelectors ?? []).map((s) => s.site));
-    for (const { stage } of runtimeForks) expect(sites.has(stage.branchSelector!.site)).toBe(true);
-  });
-
-  it("gives named stage handlers an address — tickLoop's two effects are distinguishable", () => {
-    // The motivation itself: without named handlers, tickLoop would carry two
-    // effect stages with symbolId/note/handler all null, and the index alone
-    // could not tell which is the sleep and which is the buffer write. Both are
-    // bare identifiers (sleepForSpeed / applyGenerationResult), so both have an
-    // address.
+  it("gives named stage handlers an address — tickLoop's sleep effect and advanceGeneration's own write effect are each distinguishable", () => {
+    // The motivation itself: without named handlers, an index reader could not
+    // tell two same-kind stages apart. Before this card, tickLoop carried
+    // BOTH effects itself (sleepForSpeed AND applyGenerationResult, inlined by
+    // the appendGeneration DRY function into its own stage tree); now the
+    // generation write lives solely under its own endpoint
+    // (Circuit.Sim.advanceGeneration), reached from tickLoop as a
+    // symbol-composition edge (`tap(symbol)`) rather than an inlined stage —
+    // so the two effects live on two DIFFERENT endpoints' stage trees, each
+    // still individually addressable via a bare identifier (sleepForSpeed /
+    // applyGenerationResult).
     const tickLoop = document.endpoints.find((e) => e.key === 'Circuit.Sim.tickLoop')!;
-    // Both are named handlers (sleepForSpeed / applyGenerationResult), so —
-    // kernel-introspect StageKind symbol/function/closure operand split —
-    // they mint `effect(function)`, not `effect(closure)`.
-    const effects = allStages(tickLoop.stages).filter((s) => s.kind === 'effect(function)');
-    expect(effects).toHaveLength(2);
-    expect(effects.filter((s) => s.handler !== null)).toHaveLength(2);
-    const sleep = effects.find((s) => s.handler!.functionName === 'sleepForSpeed')!;
-    expect(sleep.handler!.functionName).toBe('sleepForSpeed');
+    const advanceGeneration = document.endpoints.find((e) => e.key === 'Circuit.Sim.advanceGeneration')!;
+
+    const tickLoopEffects = allStages(tickLoop.stages).filter((s) => s.kind === 'effect(function)');
+    expect(tickLoopEffects).toHaveLength(1);
+    expect(tickLoopEffects[0].handler!.functionName).toBe('sleepForSpeed');
     // site is where the body lives (the grep target), not the wiring site.
-    expect(sleep.handler!.site).toBe('src/circuit/sim/tickLoop.ts:26');
-    const commit = effects.find((s) => s.handler!.functionName === 'applyGenerationResult')!;
-    expect(commit.handler!.site).toBe('src/circuit/sim/generation.mutator.ts:30');
+    expect(tickLoopEffects[0].handler!.site).toBe('src/circuit/sim/tickLoop.ts:32');
+
+    const advanceGenerationEffects = allStages(advanceGeneration.stages).filter((s) => s.kind === 'effect(function)');
+    expect(advanceGenerationEffects).toHaveLength(1);
+    expect(advanceGenerationEffects[0].handler!.functionName).toBe('applyGenerationResult');
+    expect(advanceGenerationEffects[0].handler!.site).toBe('src/circuit/sim/advanceGeneration.mutator.ts:30');
+
+    // tickLoop's OWN mid-pipe reference to advanceGeneration is a
+    // tap(symbol) stage — symbolId is already its identity, so it carries no
+    // handler address (a stage cannot be both `(symbol)` and named).
+    const tap = tickLoop.stages.find((s) => s.kind === 'tap(symbol)')!;
+    expect(tap.symbolId).toBe('Circuit.Sim.advanceGeneration');
+    expect(tap.handler).toBeNull();
 
     // KernelSymbol stages stay null — symbolId is already their identity, and
     // the same fact never gets a second address.
     //
     // Duplicates in the list below are real shared usage, not noise:
-    // cellVisitSwitch appears twice because strokeStart/strokeMove share the
-    // appendStrokeVisit stage sequence; mergeGranularityBranches /
-    // packGenerationResult / applyGenerationResult appear twice because
-    // tickLoop/stepOnce share appendGeneration. Entry-position bare identifiers
+    // mergeGranularityBranches / packGenerationResult / applyGenerationResult
+    // now appear ONLY ONCE EACH — they live solely inside advanceGenerationPipe's
+    // own stage tree (advanceGeneration.ts), no longer duplicated across
+    // tickLoop/stepOnce (stepOnce is gone; tickLoop/step reference the whole
+    // sequence as a symbol instead of inlining a copy of it). cellVisitSwitch
+    // similarly appears only ONCE — it lives solely in strokeMovePipe
+    // (stroke.ts), the single flow-bound pipe both stroke entries reach
+    // (strokeMove by dispatch, strokeStart by divert through
+    // strokeMove.bridge.ts); the former `appendStrokeVisit` appender that
+    // duplicated it into both endpoints' own stage trees is deleted
+    // (owner-decided 2026-07-19 — sharing is pipeline-value composition, not
+    // a helper function). Entry-position bare identifiers
     // (`pipeline(meta, fn)`) are detected the same as chain-link arguments —
     // runningPhaseSwitch / armStrokeState all have addresses. The Mutator-part
     // extraction contributes the apply* family (buffer-transition tail
     // effects that call no symbols) as named handlers too. `allStages`
     // recurses untracked branches, so play's `.spawn` launcher contributes a
-    // SECOND `granularitySwitch` (the loop's self-divert re-arm is the first).
-    // `stepGranularitySwitch` (step.ts's divert into stepOnce) appears once —
-    // a single entry stage, no self-divert twin (stepOnce never diverts back).
+    // SECOND `tickLoopBridge` (the loop's own self-divert reentry is the
+    // first) — reused at both call sites exactly the way `granularitySwitch`
+    // used to be (now deleted). `strokeMoveBridge` (stroke.ts's
+    // strokeStartPipe divert into strokeMovePipe) appears once — a one-shot
+    // connector, not a self-divert.
     //
     // The interceptor/gate migration REMOVED 4 names from this list —
     // `granularityGateAndPayload` (renamed `knownGranularityGate`), `idlePhaseGate`,
@@ -569,12 +686,15 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // framework gate BEFORE its guarded port symbol's handler is invoked, so
     // it has no address in any endpoint's stage tree. Their identity now
     // lives in `document.gates[].handler` instead (see the gates test above).
-    // Each of their old pipe-entry positions is now an anonymous pass-through
-    // closure (`pipe(closure)`, `handler: null`) — see the expectedKinds test
-    // below for stepOnce/strokeMove's first-stage kind flip.
+    //
+    // This card's own fallout (`stepOnce.bridge.ts` deleted, its
+    // `stepOnceBridge` handler gone — step's hop is now a bare
+    // `pipeline(symbol)` with no handler of its own; `mergeGranularityBranches`
+    // / `packGenerationResult` / `applyGenerationResult` each drop from 2
+    // occurrences to 1, since advanceGeneration owns them exclusively now):
+    // net -4 from the previous count.
     const named = document.endpoints.flatMap((e) => allStages(e.stages)).filter((s) => s.handler !== null);
     expect(named.map((s) => s.handler!.functionName).sort()).toEqual([
-      'applyGenerationResult',
       'applyGenerationResult',
       'applyGranularity',
       'applyHydratedSettings',
@@ -583,129 +703,188 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       'applyToggleStats',
       'armStrokeState',
       'cellVisitSwitch',
-      'cellVisitSwitch',
-      'granularitySwitch',
-      'granularitySwitch',
       'loadedSettingsSwitch',
       'mergeGranularityBranches',
-      'mergeGranularityBranches',
-      'packGenerationResult',
       'packGenerationResult',
       'packRandomizeResult',
       'runningPhaseSwitch',
       'sleepForSpeed',
-      'stepGranularitySwitch',
+      'strokeMoveBridge',
+      'tickLoopBridge',
+      'tickLoopBridge',
     ]);
     expect(named.every((s) => s.symbolId === null)).toBe(true);
   });
 
-  it('recovers the non-next verbs each endpoint can emit, following shared-stage helpers', () => {
-    // A lightweight structuring: not the predicates' contents, only the boolean
-    // of "can this pipe emit abort/fail/divert". A structural guarantee that
-    // stays true even if the note wording rots. Each value is a sorted subset
-    // of ["abort","divert","fail"].
-    const byKey = new Map(document.endpoints.map((e) => [e.key, e.emittableVerbs]));
+  it('recovers each abort call\'s own per-stage verbEmissions, with desc, by identifier resolution (schema v14)', () => {
+    // Replaces the retired v3 `EndpointEntry.emittableVerbs` (endpoint-level,
+    // shape-based, no desc) with the per-STAGE recovery: `StageEntry.
+    // verbEmissions` — `null` = not scanned, `[]` = scanned clean, an entry
+    // per identifier-resolved `abort`/`fail` call this ONE stage's own
+    // handler (inline or named) contains. Every non-empty entry across the
+    // whole app is `abort` with a real `desc` (no bare `fail(` anywhere, and
+    // every one of the 8 real abort sites was given a desc — card 3A46069E).
+    const byKey = new Map(document.endpoints.map((e) => [e.key, e]));
+    const emissionsOf = (key: string) =>
+      allStages(byKey.get(key)!.stages).flatMap((s) => s.verbEmissions ?? []);
     for (const endpoint of document.endpoints) {
-      expect(endpoint.emittableVerbs.every((v) => ['abort', 'divert', 'fail'].includes(v)), endpoint.key).toBe(true);
+      for (const emission of allStages(endpoint.stages).flatMap((s) => s.verbEmissions ?? [])) {
+        expect(emission.verb, endpoint.key).toBe('abort'); // no fail( anywhere in the real app
+        expect(typeof emission.desc, endpoint.key).toBe('string'); // every real abort site was given a desc
+      }
     }
-    // tick's abort lives in the body of the cross-file helper
-    // tickLoopPipeFor (picked up by helper following): runningPhaseSwitch is
-    // still an in-pipe Switch (unaffected by the gate migration — it decides
-    // AND self-terminates the loop, which a pre-handler veto cannot express).
-    // stepOnce's OWN abort is gone: idlePhaseGate migrated to a framework gate
-    // guarding `Circuit.Sim.step` — it runs before stepOnce's own stage tree
-    // even starts, so stepOnce's `emittableVerbs` is now `[]` (nothing left
-    // inside appendGeneration's own sequence emits a non-next verb).
-    // Mechanical evidence that a gate is invisible to the STAGE-TREE
-    // aggregation by construction — its verdicts are a different index
-    // section entirely (`document.gates`), not folded into any endpoint.
-    expect(byKey.get('Circuit.Sim.tickLoop')).toEqual(['abort']);
-    expect(byKey.get('Circuit.Sim.stepOnce')).toEqual([]);
-    // stroke's abort (outside-the-board / same cell) and divert (to togglePipe)
-    // live inside the shared appendStrokeVisit stages (cellVisitSwitch, a named
-    // function). Even in a named handler's body, divert alone is excluded from
-    // emittableVerbs — divertsTo/symbolId already hold that edge's address
-    // (avoiding double counting). abort has no such alternate channel, so it is
-    // counted: strokeStart picks up cellVisitSwitch's abort → ['abort'];
-    // strokeMove's abort ALSO stays ['abort'] — cellVisitSwitch is still an
-    // in-pipe Switch (it diverts on success, a routing verb a gate cannot
-    // express), but the OTHER source it used to have — its own entry gate
-    // (inStrokeGate) — migrated out to guard:stroke.active and no longer
-    // contributes here; cellVisitSwitch alone is enough to keep the value.
-    expect(byKey.get('Circuit.Sim.strokeStart')).toEqual(['abort']);
-    expect(byKey.get('Circuit.Sim.strokeMove')).toEqual(['abort']);
-    // Unknown-value gate migrated to guard:settings.knownGranularity (a
-    // framework gate, invisible to the stage tree — see stepOnce's own
-    // comment above), so setGranularity's own emittableVerbs is now `[]`.
-    expect(byKey.get('Circuit.Settings.setGranularity')).toEqual([]);
-    expect(byKey.get('Circuit.Settings.hydrateSettings')).toEqual(['abort']);
-    // The floor on the undetected side: the tick loop's self-divert is a
-    // delegation to granularitySwitch (a Switch part), not an inline divert()
-    // call, so it does not appear here — divertsTo holds it.
-    expect(byKey.get('Circuit.Sim.tickLoop')).not.toContain('divert');
-    // There is not a single fail( in the real app.
-    expect(document.endpoints.every((e) => !e.emittableVerbs.includes('fail'))).toBe(true);
+
+    // tick's abort lives in the body of its OWN entry stage
+    // (runningPhaseSwitch — an in-pipe Switch, unaffected by the gate
+    // migration: it decides AND self-terminates the loop, which a
+    // pre-handler veto cannot express). advanceGeneration's own stages carry
+    // NO verbEmissions at all — it is a straight-line sequence (snapshot →
+    // partition → fork(symbol) → join → fork(board/stats) → write) with no
+    // Switch or gate of its own; tickLoop's `.tap` reference to it does not
+    // fold advanceGeneration's (empty) emissions back into tickLoop's own
+    // stage tree either way — per-stage attribution never crosses a
+    // symbol-composition edge, the same way it never crossed the old
+    // builder-helper seam for shared writes (see the state-graph test
+    // above). Mechanical evidence that a gate is invisible to the
+    // STAGE-TREE aggregation by construction — its own verdict is a
+    // different index section entirely (`document.gates[].verbEmissions`),
+    // never folded into any endpoint's own stages.
+    expect(emissionsOf('Circuit.Sim.tickLoop')).toEqual([
+      { verb: 'abort', desc: 'stop settled — phase lowered to idle', site: expect.stringMatching(/runningPhase\.switch\.ts:\d+$/) },
+    ]);
+    expect(emissionsOf('Circuit.Sim.advanceGeneration')).toEqual([]);
+    expect(emissionsOf('Circuit.Sim.step')).toEqual([]); // step's one stage IS the advanceGeneration symbol — no verb of its own
+
+    // stroke's abort (outside-the-board / same cell) lives inside
+    // cellVisitSwitch (a named function) — since owner-decided 2026-07-19,
+    // that stage exists ONLY in strokeMovePipe (stroke.ts): the former
+    // `appendStrokeVisit` appender that duplicated it into both endpoints'
+    // own stage trees is deleted, so strokeMove's own stage tree picks up
+    // BOTH of cellVisitSwitch's aborts, each with its own desc (moved from
+    // the trailing `// outside the board` / `// suppress same-cell repeats`
+    // comments). `divert` is never verbEmissions data at all (schema v14 —
+    // it is validated for divertsTo completeness, never stored), so
+    // cellVisitSwitch's own `diverts.toggle(cell)` call contributes nothing
+    // here regardless. strokeStart's own stage tree carries NO verbEmissions
+    // — its two stages (armStrokeState, strokeMoveBridge) have no abort of
+    // their own; strokeStart only REACHES cellVisitSwitch's aborts across
+    // the divert edge into strokeMovePipe, which per-stage attribution does
+    // not follow (a divert hop is a separate catalogued pipe, not spliced
+    // into the diverting endpoint's own chain).
+    expect(emissionsOf('Circuit.Sim.strokeStart')).toEqual([]);
+    expect(emissionsOf('Circuit.Sim.strokeMove')).toEqual([
+      { verb: 'abort', desc: 'outside the board', site: expect.stringMatching(/cellVisit\.switch\.ts:\d+$/) },
+      { verb: 'abort', desc: 'suppress same-cell repeats', site: expect.stringMatching(/cellVisit\.switch\.ts:\d+$/) },
+    ]);
+
+    // Unknown-value gate is a framework gate (guard:settings.knownGranularity,
+    // invisible to the stage tree), so setGranularity's own stage tree
+    // carries no verbEmissions. hydrateSettings still aborts in-pipe
+    // (loadedSettingsSwitch — a RESULT-dependent decision).
+    expect(emissionsOf('Circuit.Settings.setGranularity')).toEqual([]);
+    expect(emissionsOf('Circuit.Settings.hydrateSettings')).toEqual([
+      { verb: 'abort', desc: 'missing or corrupt data — keep defaults', site: expect.stringMatching(/loadedSettings\.switch\.ts:\d+$/) },
+    ]);
+
+    // The 4 framework gates each carry their own abort, with desc, on
+    // GateEntry.verbEmissions — never folded into any endpoint's stages.
+    const gateEmissions = new Map((document.gates ?? []).map((g) => [g.id, g.verbEmissions ?? []]));
+    expect(gateEmissions.get('guard:loop.launchArm')).toEqual([
+      { verb: 'abort', desc: 'already active — no double start, in-flight loop reused', site: expect.stringMatching(/launchArm\.gate\.ts:\d+$/) },
+    ]);
+    expect(gateEmissions.get('guard:loop.idle')).toEqual([
+      { verb: 'abort', desc: 'not idle — step ignored', site: expect.stringMatching(/idlePhase\.gate\.ts:\d+$/) },
+    ]);
+    expect(gateEmissions.get('guard:stroke.active')).toEqual([
+      { verb: 'abort', desc: 'no active stroke — ignored', site: expect.stringMatching(/inStroke\.gate\.ts:\d+$/) },
+    ]);
+    expect(gateEmissions.get('guard:settings.knownGranularity')).toEqual([
+      { verb: 'abort', desc: 'unknown granularity value — ignored', site: expect.stringMatching(/knownGranularity\.gate\.ts:\d+$/) },
+    ]);
+
+    // Completeness: the tick loop's self-divert (tickLoopBridge's
+    // `diverts.tickLoop(undefined)`) is a typed-channel property call, never
+    // a direct identifier `divert(...)` — no `undeclaredDivert`/
+    // `unattributedVerbEmission` anywhere (the hard 0 floor above already
+    // proves this; restated here for locality with this test's own claims).
+    expect((document.unresolved ?? []).filter((u) => u.kind === 'unattributedVerbEmission' || u.kind === 'undeclaredDivert')).toEqual([]);
   });
 
-  it('recovers per-stage flows across builder-helper seams and flat chains, kind-verified', () => {
+  it('recovers per-stage flows across flat chains and a symbol-composition edge, kind-verified', () => {
     const byKey = new Map(document.endpoints.map((e) => [e.key, e]));
 
-    // tickLoop/stepOnce (cachedPipe + appendGeneration) and stroke
-    // (appendStrokeVisit) are assembled by cross-file builder helpers. The
-    // chain-splicer penetrates the seam, so the flows of every top-level stage
-    // are recovered with concrete types (with a safety net that matches each
-    // link's derived kind against the projected stage kind and refuses to
-    // attach on a mismatch).
-    // Root/entry stages that are STILL in-pipe Switch parts (bare identifiers
-    // — mergeGranularityBranches/packGenerationResult/applyGenerationResult/
-    // sleepForSpeed/granularitySwitch/cellVisitSwitch/armStrokeState/
-    // runningPhaseSwitch) mint the `(function)` operand; the two remaining
-    // inline-arrow assembly stages per chain stay `(closure)` (kernel-introspect
-    // StageKind symbol/function/closure operand split).
+    // Before this card, tickLoop/stepOnce were assembled by the cross-file
+    // builder helper appendGeneration — a construction-time DRY function that
+    // copied its stages into BOTH pipes, and the chain-splicer had to
+    // penetrate that seam to recover flows for the copied stages. That seam
+    // is gone: the generation sequence is now ONE pipe
+    // (`advanceGenerationPipe`, advanceGeneration.ts) bound to its own port
+    // symbol, and tickLoop/step reference it as an ordinary
+    // `tap(symbol)`/`pipe(symbol)` stage — no splicing needed, because there
+    // is no longer a second copy to splice into. Each endpoint below is
+    // simply its own flat chain. stroke (strokeStart / strokeMove) is NOT a
+    // builder-helper seam either (owner-decided 2026-07-19, unrelated to this
+    // card): the former `appendStrokeVisit` appender is deleted, and sharing
+    // is expressed as pipeline-value composition instead — one flow-bound
+    // pipe (`strokeMovePipe`) entered by divert (`strokeMove.bridge.ts`).
     //
-    // stepOnce's and strokeMove's own FIRST stage flips from `(function)` to
-    // `(closure)` here — the interceptor/gate migration: idlePhaseGate /
-    // inStrokeGate used to be THIS stage (a named bare-identifier entry gate);
-    // now each is a framework gate guarding its port symbol from outside the
-    // pipe entirely, so this pipe's own entry is a minimal anonymous
-    // pass-through (`(_kernel, payload) => next(...)`, `handler: null`).
-    // tickLoop/strokeStart are untouched — their own entry stages
-    // (runningPhaseSwitch / armStrokeState) are not part of this migration.
+    // Root/entry stages that are bare identifiers (mergeGranularityBranches/
+    // packGenerationResult/applyGenerationResult/sleepForSpeed/tickLoopBridge/
+    // strokeMoveBridge/cellVisitSwitch/armStrokeState/runningPhaseSwitch) mint
+    // the `(function)` operand; the anonymous inline-arrow assembly stages
+    // per chain stay `(closure)` (kernel-introspect StageKind
+    // symbol/function/closure operand split); a stage referencing a bound
+    // port symbol (Compute.Life.partitionRanges, Circuit.Sim.advanceGeneration)
+    // mints `(symbol)`.
+    //
+    // step's own single stage is `pipe(symbol)` — `pipeline(SimPort.
+    // advanceGeneration)`, the symbol-entry form: the symbol IS the whole
+    // pipe, so there is no anonymous entry stage at all (unlike stepOnce's
+    // former minimal pass-through, which existed only because idlePhaseGate's
+    // migration left its old entry-gate position empty — that whole pipe, and
+    // that whole migration remnant, is gone with it).
     const expectedKinds: Record<string, string[]> = {
-      'Circuit.Sim.tickLoop': [
-        'pipe(function)',
-        'pipe(closure)',
-        'fork(branches)',
-        'map(function)',
-        'pipe(closure)',
-        'fork(branches)',
-        'map(function)',
-        'effect(function)',
-        'effect(function)',
-        'pipe(function)',
-      ],
-      'Circuit.Sim.stepOnce': [
+      'Circuit.Sim.tickLoop': ['pipe(function)', 'tap(symbol)', 'effect(function)', 'pipe(function)'],
+      'Circuit.Sim.step': ['pipe(symbol)'],
+      'Circuit.Sim.advanceGeneration': [
         'pipe(closure)',
         'pipe(closure)',
-        'fork(branches)',
+        'pipe(symbol)',
+        'fork(symbol)',
         'map(function)',
         'pipe(closure)',
         'fork(branches)',
         'map(function)',
         'effect(function)',
       ],
-      'Circuit.Sim.strokeStart': ['pipe(function)', 'pipe(closure)', 'pipe(symbol)', 'pipe(function)'],
-      'Circuit.Sim.strokeMove': ['pipe(closure)', 'pipe(closure)', 'pipe(symbol)', 'pipe(function)'],
+      // strokeStart: armStrokeState (entry) → strokeMoveBridge (fixed hop
+      // into strokeMove). Just 2 stages now — no shared-tail duplication.
+      'Circuit.Sim.strokeStart': ['pipe(function)', 'pipe(function)'],
+      // strokeMove: assemble HitCellInput (closure, now the entry) →
+      // LifePort.hitCell (symbol) → cellVisitSwitch (function). 3 stages —
+      // the old anonymous pass-through entry (the inStrokeGate migration
+      // remnant) is gone; this pipe simply opens on its first real stage.
+      'Circuit.Sim.strokeMove': ['pipe(closure)', 'pipe(symbol)', 'pipe(function)'],
     };
     for (const [key, kinds] of Object.entries(expectedKinds)) {
       const stages = byKey.get(key)?.stages ?? [];
       expect(stages.map((s) => s.kind), key).toEqual(kinds);
       expect(stages.every((s) => s.flows !== null), key).toBe(true);
     }
-    // appendGeneration's tail .effect writes the board — the cursor is the generation result (cells/stats).
-    const tickEffect = byKey.get('Circuit.Sim.tickLoop')?.stages[7];
-    expect(tickEffect?.kind).toBe('effect(function)');
-    expect(tickEffect?.flows).toContain('cells');
+    // advanceGenerationPipe's tail .effect writes the board — the cursor is
+    // the generation result (cells/stats). It is now on advanceGeneration's
+    // OWN stage list (index 8, its last stage), not tickLoop's.
+    const advanceEffect = byKey.get('Circuit.Sim.advanceGeneration')?.stages[8];
+    expect(advanceEffect?.kind).toBe('effect(function)');
+    expect(advanceEffect?.flows).toContain('cells');
+
+    // tickLoop's own tap(symbol) stage carries the flows fact too — the
+    // cursor stays `void` across it (a tap forwards its input unchanged), so
+    // this is the one place `flows` is expected to be the trivial `'void'`,
+    // not a miss.
+    const tickTap = byKey.get('Circuit.Sim.tickLoop')?.stages[1];
+    expect(tickTap?.kind).toBe('tap(symbol)');
+    expect(tickTap?.flows).toBe('void');
 
     // randomize is a flat chain within a single file (regression guard — it must stay populated).
     const randomizeStages = byKey.get('Circuit.Sim.randomize')?.stages ?? [];
@@ -744,7 +923,22 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
         ...s.branches.flatMap((b) => collect(b)),
       ]);
     const sites = document.endpoints.flatMap((e) => collect(e.stages));
-    expect(sites.length).toBeGreaterThanOrEqual(69); // total stage count of the current catalog (shrinking = regression signal)
+    // fork(symbol)-card floor drop (69 → 60) and the stroke-sharing dedup
+    // (60 → 57) both predate this card — see git history for their own
+    // reasoning. THIS card's floor drop (57 → 45, a DELIBERATE shrink, not a
+    // regression): the generation sequence used to be duplicated into BOTH
+    // tickLoop's and stepOnce's own stage trees by the construction-time DRY
+    // function appendGeneration (9 stages, counted twice = 18 total
+    // contribution). Now it is ONE pipe (`advanceGenerationPipe`,
+    // advanceGeneration.ts, still 9 stages) bound to its own port symbol and
+    // referenced by tickLoop/step as a `tap(symbol)`/`pipe(symbol)` stage —
+    // counted ONCE (9), not twice. tickLoop itself shrinks from 12 stages to
+    // 4 (its own entry switch + the tap(symbol) reference + sleep + the
+    // self-divert bridge); stepOnce (10 stages: the appendGeneration copy
+    // plus its own minimal entry pass-through) is replaced by step's single
+    // `pipe(symbol)` stage (1). Net: a real dedup on the graph (the sequence
+    // has exactly one owning endpoint now), not a coverage loss.
+    expect(sites.length).toBeGreaterThanOrEqual(45); // total stage count of the current catalog (shrinking further = regression signal)
     expect(sites.filter((s) => s === 'MISSING')).toEqual([]);
     expect(sites.every((s) => /^src\/.+\.tsx?:\d+$/.test(s))).toBe(true);
   });
@@ -821,13 +1015,18 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     //                       at all", not a coverage gap; schema v12
     //                       suppresses the report in exactly this case.
     // orphanEntry stays ZERO (dropped 1 → 0 in an earlier card): stepOnce,
-    // the last real orphan (card B004D425), is resolved the SAME structural
+    // the last real orphan (card B004D425), was resolved the SAME structural
     // way tickLoop's orphan was (card 4/4) — a distinct catalogued saga node
     // reached by an external `divertsTo` edge from a calling stage — but with
-    // a DIFFERENT verb: `step` reaches `stepOnce` via `divert` (in-pipe,
+    // a DIFFERENT verb: `step` reached `stepOnce` via `divert` (in-pipe,
     // on-bus, awaited by `kernel.run`), not play's detached `.spawn`, because
     // step's one-shot lap has no daemon guard of its own and must stay
-    // serialized by the bus (see step.ts's doc comment).
+    // serialized by the bus. `stepOnce` (and that divert) no longer exist at
+    // all: this card supersedes the whole hop with a symbol-composition edge
+    // into `Circuit.Sim.advanceGeneration` (`pipeline(symbol)`, step.ts) —
+    // orphanEntry stays at zero for the new, structurally different reason
+    // that `advanceGeneration` is directly BOUND (not merely divert-reached),
+    // so orphan status was never even a question for it.
     //
     // This floor is deliberately a hard 0, not "whatever an allowlist
     // permits": even a FUTURE known-and-accepted item (e.g. one added to
@@ -897,7 +1096,7 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     }
   });
 
-  it('parts: all 13 part files (switch 5 / emitter 2 / mutator 6) are indexed with usedBy — the subgraph as nodes', () => {
+  it('parts: all 14 part files (switch 3 / emitter 2 / mutator 7 / bridge 2) are indexed with usedBy — the subgraph as nodes', () => {
     // The test above (the handler.site reference floor) is "prevention of dead
     // part files" seen from the filesystem side. This one is the index itself
     // producing the parts section — the subgraph-as-nodes answer to "can this
@@ -906,23 +1105,28 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // bless regressions — an expectation-lowering diff is the strongest
     // regression signal).
     //
-    // The 5 switches: granularity / runningPhase / cellVisit / loadedSettings /
-    // stepGranularity. Down from 9 (the interceptor/gate migration): launchArm /
-    // idlePhase / inStroke / knownGranularity are no longer part files at all —
-    // each is a `*.gate.ts` framework interceptor (declareGate/KernelBuilder.
-    // guard), invisible to the switch/emitter/mutator topology because it runs
-    // BEFORE its guarded port symbol's handler is even invoked (no stage-link
-    // chain — see circuit/sim/launchArm.gate.ts's own doc comment). The 6
-    // mutators: running (now pause only) / generation / randomize / toggleCell /
-    // stroke / simState — unaffected by this migration. The bridge kind exists
-    // as a slot but lifegame has 0 (the slot existing is itself meaningful — see
-    // arch-circuit.md), so it does not appear in byKind.
+    // The 3 switches: runningPhase / cellVisit / loadedSettings — unaffected
+    // by this card (unchanged since the fork(symbol) card, FEA89296: see git
+    // history for that migration's own reasoning). The 7 mutators: running
+    // (pause only) / advanceGeneration (renamed from generation) / randomize /
+    // toggleCell / stroke / simState / kernelError — also unaffected in count,
+    // only advanceGeneration's name changed. The 2 emitters: advanceGeneration
+    // (renamed from generation) / randomize.
+    //
+    // The bridges drop from 3 to 2 THIS card: `stepOnce.bridge.ts` is deleted
+    // along with the pipe it hopped into (`stepOnce.ts`) — the one-shot hop it
+    // used to name is superseded by referencing the generation sequence
+    // directly as a port symbol (`Circuit.Sim.advanceGeneration`,
+    // `pipeline(symbol)` in step.ts) — a symbol-composition edge, not a
+    // divert, so there is no bridge hop left to name. `tickLoop.bridge.ts`
+    // (the self-divert reentry, shared with play's `.spawn` launcher) and
+    // `strokeMove.bridge.ts` (strokeStart's hop into strokeMovePipe, carrying
+    // its cursor — owner-decided 2026-07-19) remain the 2 survivors.
     const parts = document.parts ?? [];
     const byKind = new Map<string, number>();
     for (const part of parts) byKind.set(part.kind, (byKind.get(part.kind) ?? 0) + 1);
-    expect(Object.fromEntries(byKind)).toEqual({ switch: 5, emitter: 2, mutator: 6 });
-    expect(parts).toHaveLength(13);
-    expect(parts.filter((p) => p.kind === 'bridge')).toEqual([]);
+    expect(Object.fromEntries(byKind)).toEqual({ mutator: 7, switch: 3, emitter: 2, bridge: 2 });
+    expect(parts).toHaveLength(14);
 
     // usedBy is non-empty for every part (empty would raise a partUsage
     // unresolved — the index-side shape of the same CI-floor fact).
@@ -932,13 +1136,25 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect((document.unresolved ?? []).filter((u) => u.kind === 'partUsage')).toEqual([]);
 
     // A part's identity is (name, kind) — the owning pipeline goes into name
-    // and the role into kind. generation / randomize share a name between
-    // emitter and mutator, so name alone cannot look them up.
+    // and the role into kind. advanceGeneration / randomize share a name
+    // between emitter and mutator, so name alone cannot look them up.
     const byId = new Map(parts.map((p) => [`${p.name}.${p.kind}`, p]));
     expect(byId.size).toBe(parts.length); // the (name, kind) uniqueness itself is a floor
-    // Representative values: shared parts name all their users (usedBy is sorted).
-    expect(byId.get('generation.emitter')?.usedBy).toEqual(['Circuit.Sim.stepOnce', 'Circuit.Sim.tickLoop']);
-    expect(byId.get('cellVisit.switch')?.usedBy).toEqual(['Circuit.Sim.strokeMove', 'Circuit.Sim.strokeStart']);
+    // Representative values: shared parts name all their users (usedBy is
+    // sorted). advanceGeneration.emitter/.mutator now name exactly ONE user —
+    // `Circuit.Sim.advanceGeneration` itself — because advanceGenerationPipe
+    // OWNS both directly (it is no longer a shared stage sequence appended by
+    // two callers; tickLoop and step reference it as a port symbol instead).
+    // This is the direct, intended consequence of this card: part attribution
+    // is now one-to-one with the single owning endpoint, not fanned out across
+    // every caller that used to inline a copy of the sequence.
+    expect(byId.get('advanceGeneration.emitter')?.usedBy).toEqual(['Circuit.Sim.advanceGeneration']);
+    expect(byId.get('advanceGeneration.mutator')?.usedBy).toEqual(['Circuit.Sim.advanceGeneration']);
+    // cellVisit.switch: strokeMove-only now — it lives solely in
+    // strokeMovePipe (stroke.ts). strokeStart no longer reaches it directly;
+    // it hops into strokeMovePipe first (strokeMove.bridge.ts), so
+    // strokeStart's usedBy edge is on strokeMove.bridge, not here.
+    expect(byId.get('cellVisit.switch')?.usedBy).toEqual(['Circuit.Sim.strokeMove']);
     // A mutator's usedBy is the UNION of StageEntry.handler.site (chain-link /
     // entry bare identifiers) and command endpoints' declaration sites
     // (assembly.ts) — either path counts regardless of kind. running now holds
@@ -946,9 +1162,12 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     // a saga when its launch became a `.spawn`, so it no longer references this
     // Mutator.
     expect(byId.get('running.mutator')?.usedBy).toEqual(['Circuit.Sim.pause']);
-    // The generation/randomize/toggleCell mutators go via handler.site
-    // (bare identifiers of chain-link `.effect(...)`).
-    expect(byId.get('generation.mutator')?.usedBy).toEqual(['Circuit.Sim.stepOnce', 'Circuit.Sim.tickLoop']);
+    // kernelError.mutator: the same shape as running.mutator — a command
+    // endpoint's declaration site is its sole usedBy entry (Circuit.Faults.clearError
+    // calls no symbol, so it stays a plain Mutator with no chain-link handler.site).
+    expect(byId.get('kernelError.mutator')?.usedBy).toEqual(['Circuit.Faults.clearError']);
+    // The randomize/toggleCell mutators go via handler.site (bare identifiers
+    // of chain-link `.effect(...)`), unaffected by this card.
     expect(byId.get('randomize.mutator')?.usedBy).toEqual(['Circuit.Sim.randomize']);
     expect(byId.get('toggleCell.mutator')?.usedBy).toEqual(['Circuit.Sim.toggleCell']);
     // stroke is the living example of the UNION: armStrokeState is
@@ -963,14 +1182,16 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
       'Circuit.Settings.setGranularity',
       'Circuit.Settings.setSpeed',
     ]);
-    // granularity.switch is now shared: the loop's self-divert re-arm
-    // (tickLoop) AND play's `.spawn` launcher both reuse it (the same "read
-    // granularity+board-size → divert into tickLoopPipeFor" hop).
-    expect(byId.get('granularity.switch')?.usedBy).toEqual(['Circuit.Sim.play', 'Circuit.Sim.tickLoop']);
-    // stepGranularity.switch: step's divert-target chooser (card B004D425) —
-    // a ONE-SHOT hop into stepOnce, not a self-divert, so unlike
-    // granularity.switch it has exactly one user.
-    expect(byId.get('stepGranularity.switch')?.usedBy).toEqual(['Circuit.Sim.step']);
+    // tickLoop.bridge is shared: the loop's self-divert reentry (tickLoop)
+    // AND play's `.spawn` launcher both reuse it (the same fixed "divert into
+    // tickLoop" hop).
+    expect(byId.get('tickLoop.bridge')?.usedBy).toEqual(['Circuit.Sim.play', 'Circuit.Sim.tickLoop']);
+    expect(byId.has('stepOnce.bridge')).toBe(false); // deleted this card, along with stepOnce.ts
+    // strokeMove.bridge: strokeStart's fixed hop into strokeMovePipe — also a
+    // ONE-SHOT connector (not a self-divert). strokeMovePipe itself does NOT
+    // use the bridge (it is the divert TARGET, reached by dispatch too), so
+    // the sole user is strokeStart.
+    expect(byId.get('strokeMove.bridge')?.usedBy).toEqual(['Circuit.Sim.strokeStart']);
     // runningPhase.switch stays tickLoop-only: it is the LOOP's own entry
     // switch, reached from play only by divert (not in play's spawn stage
     // tree). Unlike launchArm/idlePhase (play's/step's own entry gates),
@@ -990,6 +1211,12 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     expect(byId.has('idlePhase.switch')).toBe(false);
     expect(byId.has('inStroke.switch')).toBe(false);
     expect(byId.has('knownGranularity.switch')).toBe(false);
+    // granularity.switch / stepGranularity.switch are ALSO gone (deleted by
+    // the earlier fork(symbol) card, files removed entirely — reclassified as
+    // tickLoop.bridge / the now-also-deleted stepOnce.bridge, not moved to a
+    // gate).
+    expect(byId.has('granularity.switch')).toBe(false);
+    expect(byId.has('stepGranularity.switch')).toBe(false);
   });
 
   /**
@@ -1107,27 +1334,33 @@ describe('runIntrospect against the real wiring catalog (index.json schema)', ()
     }
   });
 
-  it('sharedStages: only builder helpers shared by 2+ endpoints are indexed — the 2 entries appendGeneration / appendStrokeVisit', () => {
+  it('sharedStages: only builder helpers shared by 2+ endpoints are indexed — now honestly empty (appendGeneration retired)', () => {
     // The chain splice already knows "which endpoint went through which helper"
     // — this pins that the record is not discarded and reaches sharedStages.
-    // Named stage HANDLERS (sleepForSpeed / granularitySwitch etc.) are not
-    // sharedStages (that is the StageEntry.handler axis). branchesFor /
-    // rangeBranch (the fork-branch-side builders) are not indexed here either
-    // (valueSelectors / branchSelector are already their address). Helpers used
+    // Named stage HANDLERS (sleepForSpeed / tickLoopBridge etc.) are not
+    // sharedStages (that is the StageEntry.handler axis). Any fork-branch-side
+    // value→branch builder would not be indexed here either (valueSelectors /
+    // branchSelector are already their address) — moot today since this app's
+    // own `valueSelectors` is `[]` (see the dedicated test above). Helpers used
     // by only 1 endpoint are by definition not indexed (SharedStageEntry doc:
     // "shared by 2+ endpoints") — their absence is spec, not a miss.
-    expect(document.sharedStages).toEqual([
-      {
-        name: 'appendGeneration',
-        file: 'src/circuit/sim/generation.ts',
-        usedBy: ['Circuit.Sim.stepOnce', 'Circuit.Sim.tickLoop'],
-      },
-      {
-        name: 'appendStrokeVisit',
-        file: 'src/circuit/sim/stroke.ts',
-        usedBy: ['Circuit.Sim.strokeMove', 'Circuit.Sim.strokeStart'],
-      },
-    ]);
+    //
+    // appendGeneration — the last remaining sharedStages entry — is ALSO gone
+    // this card, for the same underlying reason appendStrokeVisit went first
+    // (owner-decided 2026-07-19): sharing is pipeline-value composition, never
+    // a construction-time helper function. The generation sequence is now ONE
+    // pipe bound to its own port symbol (`Circuit.Sim.advanceGeneration`,
+    // advanceGeneration.ts), and tickLoop/step reference it as a
+    // `tap(symbol)`/`pipe(symbol)` stage — there is no second stage-tree copy
+    // for a chain splice to attribute, so there is nothing left for
+    // sharedStages to name. That shared node's "2 real callers" fact now
+    // lives on `document.symbols[].usedByStagesOf` instead (see the
+    // shared-symbol test above and the dedicated advanceGeneration
+    // reach-path test), not in sharedStages. With both former entries gone,
+    // `sharedStages` is now honestly `[]` for this app's entire topology —
+    // not an unscanned null (see the parts/sharedStages-are-real-arrays test
+    // below), a genuine zero.
+    expect(document.sharedStages).toEqual([]);
   });
 
   it('parts/sharedStages are real arrays, not null (unscanned) — types stays null, still out of scope', () => {

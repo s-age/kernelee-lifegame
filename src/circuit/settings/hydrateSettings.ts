@@ -12,7 +12,7 @@ import { applyHydratedSettings } from './simState.mutator';
  * settings never block startup. Speed goes through the same clamp on hydrate.
  */
 export const hydratePipe = pipeline(SettingsStorePort.load)
-  .pipe({ note: 'Missing or corrupt data keeps the defaults (abort — settings never block startup)' }, loadedSettingsSwitch)
+  .pipe({ note: 'settings loaded?' }, loadedSettingsSwitch)
   .effect(applyHydratedSettings) // Mutator part (simState.mutator.ts): buffer write only
   .seal();
 

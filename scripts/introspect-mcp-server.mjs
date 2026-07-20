@@ -31,16 +31,34 @@ try {
 
 const { configurationFromEnvironmentOverridingDefaults, runKernelIntrospectMCPServer } = mod;
 
+// arch_monitor's data source: the rolling TraceState dump the devtools bridge persists from the
+// live session (bridge `--trace-out`, default). The default path is derived from the SAME shared
+// rule the bridge CLI itself uses, imported from its dependency-zero "./trace-path" subpath (no
+// ws/server load) so both sides land on the identical repoRoot-derived path without either
+// hardcoding the string a second time. Overridable via KERNEL_INTROSPECT_TRACE_PATH.
+let tracePath;
+try {
+  const { defaultTraceOutPath } = await import('@s-age/kernelee-devtools-bridge/trace-path');
+  tracePath = defaultTraceOutPath(repoRoot);
+} catch (error) {
+  // devtools-bridge is not built. Unlike mcp-tools above, this is not fatal — only arch_monitor
+  // is affected (it reports tracePath as unset), so the other five tools keep working.
+  console.error(
+    '[kernel-introspect] @s-age/kernelee-devtools-bridge is not built; ' +
+      'arch_monitor will report tracePath as unset. ' +
+      'To enable: (cd ../kernelee-devtools-bridge && npm run build).\n' +
+      String(error),
+  );
+  tracePath = undefined;
+}
+
 const defaults = {
   indexPath: resolve(repoRoot, '.claude/introspect/index.json'),
   repoRoot,
   refreshCommand: 'npm run introspect',
   refreshTimeoutSeconds: 300,
-  // arch_monitor's data source: the rolling TraceState dump the devtools bridge
-  // persists from the live session (bridge `--trace-out`, default). Overridable
-  // via KERNEL_INTROSPECT_TRACE_PATH. Unset → arch_monitor reports it cleanly
-  // and the other five tools are unaffected.
-  tracePath: '/tmp/kernelee-trace.json',
+  // Unset → arch_monitor reports it cleanly and the other five tools are unaffected.
+  tracePath,
 };
 
 await runKernelIntrospectMCPServer(configurationFromEnvironmentOverridingDefaults(defaults));

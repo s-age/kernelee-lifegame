@@ -4,7 +4,7 @@
 // GridState/StatsState) lives here as the bare identifier passed to
 // `.effect(applyRandomizeResult)`. A part's identity is (name, kind) — sharing
 // the name "randomize" with randomize.emitter.ts is unique (details in the doc
-// of generation.mutator.ts).
+// of advanceGeneration.mutator.ts).
 
 import type { Kernel } from '@s-age/kernelee';
 import { GridState, StatsState } from '../../contract/states';

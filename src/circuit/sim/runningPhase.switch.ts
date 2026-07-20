@@ -22,7 +22,7 @@ export function runningPhaseSwitch(kernel: Kernel, _payload: void) {
   if (kernel.buffer.read(LoopState).phase !== 'running') {
     // Stop settled — lower the phase so the next play can relaunch. Keep the current reference when already 'idle'.
     kernel.buffer.mutate(LoopState, (loop) => (loop.phase === 'idle' ? loop : { phase: 'idle' as const }));
-    return abort(undefined);
+    return abort(undefined, 'stop settled — phase lowered to idle');
   }
   return next();
 }

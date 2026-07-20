@@ -30,6 +30,18 @@ export interface StepIndexRangeInput {
   readonly end: number;
 }
 
+/**
+ * Input for `partitionRanges`. `cells`/`width`/`height` are a board snapshot
+ * (already read from the buffer by the caller); `granularity` picks how many
+ * ranges to carve it into (chunk=CHUNK_COUNT / row=height / cell=width*height).
+ */
+export interface PartitionInput {
+  readonly cells: Uint8Array;
+  readonly width: number;
+  readonly height: number;
+  readonly granularity: ForkGranularity;
+}
+
 /** Input for `randomize`. When `seed` is omitted the implementation picks a non-deterministic seed. */
 export interface RandomizeInput {
   readonly width: number;
@@ -84,6 +96,9 @@ export interface SimSettings {
 export const LifePort = defineCallable('Compute.Life', {
   stepIndexRange: port<StepIndexRangeInput, Uint8Array>(
     'Advance the cells in start..end (half-open range, flat indices) one generation under B3/S23 with torus boundaries, returning just that range',
+  ),
+  partitionRanges: port<PartitionInput, ReadonlyArray<StepIndexRangeInput>>(
+    'Partition a w×h board (w,h ≥ 1) by granularity (chunk=CHUNK_COUNT/row=height/cell=width*height) into ≥1 complete StepIndexRangeInput payloads whose ranges are non-overlapping, row-major-ordered, and jointly cover the whole board — cells is the same reference shared by every element',
   ),
   randomize: port<RandomizeInput, Uint8Array>(
     'Generate a random board of the given density with a seeded PRNG (mulberry32) — same seed, same board',
@@ -141,6 +156,9 @@ export const SimPort = defineCallable('Circuit.Sim', {
   strokeEnd: portK<void, void>(
     'End a stroke — discard the stroke state',
   ),
+  advanceGeneration: portK<void, void>(
+    'Advance the board exactly one generation (pair-emitting GridState + StatsState). A predefined process invoked mid-pipe by tickLoop and step — not a command intended for dispatch.',
+  ),
 });
 
 /**
@@ -162,6 +180,19 @@ export const SettingsPort = defineCallable('Circuit.Settings', {
 });
 
 /**
+ * Error-surface operations port (composite, kernel-first). Implemented by the
+ * Circuit ring's faults family (circuit/faults/, mapping 1:1 to the port
+ * namespace). Isolated from sim/settings because clearing the error banner is
+ * not domain to either — it acts on the framework-owned `KernelErrorState`
+ * cell, not on this app's own board/settings state.
+ */
+export const FaultsPort = defineCallable('Circuit.Faults', {
+  clearError: portK<void, void>(
+    'Clear KernelErrorState back to { message: null } — the displaying view (ErrorBanner) dispatches this to dismiss the banner; the default error sink only ever writes the cell, never clears it',
+  ),
+});
+
+/**
  * Typed divert-target keys (kernelee `DispatchKey`) — the divert-side
  * vocabulary, next to the dispatch-side `SimActions` below for the same
  * reason: a pre-minted, typed token is plain data and belongs in contract.
@@ -175,18 +206,50 @@ export const SettingsPort = defineCallable('Circuit.Settings', {
  * already keys togglePipe under — so the typed tier changes nothing in the
  * projected wiring graph (divertedFrom edges, catalog keys, allowlists);
  * it only adds the compile-time payload check and the kernel-level binding
- * that the free-string tier never had.
+ * that the free-string tier never had. `strokeMove` follows the same
+ * port-id-reuse shape: `SimPort.strokeMove.id`, because the flow-bound pipe
+ * IS strokeMovePipe itself — strokeStart diverts here to have the start
+ * point interpreted as the first move (circuit/sim/strokeMove.bridge.ts).
+ * Reusing a GATE-GUARDED port's id as a flow key is a first for this app —
+ * the `toggleCell` precedent above guards nothing — and it is safe for a
+ * structural reason, not a coincidence: a gate folds into the SYMBOL's
+ * handler table at `build()` time, while `flow()` populates the DIVERT-
+ * resolution table; the two tables never intersect, so a divert (key → pipe
+ * directly) never invokes the symbol handler and therefore never runs the
+ * gate (`guard:stroke.active`, circuit/sim/inStroke.gate.ts). A future reader
+ * reusing a guarded port's id as a flow key should cite both precedents:
+ * `toggleCell` (id reuse, no gate involved) and `strokeMove` (id reuse
+ * across a gate, safe because gate and flow resolution never meet).
  *
- * Only statically-known divert targets get a key. The tick loop's self-divert
- * target stays on the unchecked tier by design — see
- * circuit/sim/granularity.switch.ts for the reasoning (the target pipe is
- * selected per-lap from runtime buffer state, and the 'cell'-granularity
- * family is deliberately lazy-built).
+ * `tickLoop` is typed too, unlike before: once the generation loop's
+ * runtime-variable axis (granularity/board size) moved into `fork(symbol)`
+ * (LifePort.partitionRanges → LifePort.stepIndexRange, a runtime-sized
+ * fan-out over the SAME module-constant pipe — circuit/sim/tickLoop.ts), the
+ * self-divert has exactly ONE static destination — a fixed, decisionless hop
+ * (a Bridge part: circuit/sim/tickLoop.bridge.ts), not a per-(granularity,
+ * size) pipe choice. There is no longer a free-string, type-free divert tier
+ * "by design" case in this app — every divert target here is bound through
+ * `builder.flow(...)`.
+ *
+ * `step` no longer diverts anywhere: its former one-shot hop into a separate
+ * `stepOnce` pipe (`stepOnce.bridge.ts`, deleted) is superseded by referencing
+ * the shared generation sequence directly as a port symbol
+ * (`Circuit.Sim.advanceGeneration`, circuit/sim/advanceGeneration.ts) — a
+ * symbol-composition edge, not a divert, so `SimFlowKeys` carries no
+ * `stepOnce` entry any more.
  */
 export const SimFlowKeys = {
   toggleCell: dispatchKey<CellCoord>(
     SimPort.toggleCell.id,
     'Flip the given cell dead/alive — the stroke saga diverts here per visited cell',
+  ),
+  strokeMove: dispatchKey<NormalizedPoint>(
+    SimPort.strokeMove.id,
+    'Interpret one stroke point (the shared visit-interpretation pipe) — strokeStart diverts here so the start point is interpreted as the first move',
+  ),
+  tickLoop: dispatchKey<void>(
+    'Circuit.Sim.tickLoop',
+    'The generation loop body — play\'s detached .spawn launcher and the loop\'s own lap-end both divert here (self-divert reentry)',
   ),
 } as const;
 
@@ -201,6 +264,9 @@ export const SimActions = actionsOf(SimPort);
 /** Action creators for SettingsPort — same convention as SimActions. */
 export const SettingsActions = actionsOf(SettingsPort);
 
+/** Action creators for FaultsPort — same convention as SimActions. */
+export const FaultsActions = actionsOf(FaultsPort);
+
 /** Device type the Compute ring must implement. */
 export type LifeDevice = CallableDeviceOf<typeof LifePort>;
 
@@ -209,6 +275,9 @@ export type SimDevice = CallableDeviceOf<typeof SimPort>;
 
 /** Device type the Circuit ring's settings family must implement. */
 export type SettingsDevice = CallableDeviceOf<typeof SettingsPort>;
+
+/** Device type the Circuit ring's faults family must implement. */
+export type FaultsDevice = CallableDeviceOf<typeof FaultsPort>;
 
 /** Device type the Infrastructure ring must implement (implementation of SettingsStorePort). */
 export type SettingsStoreDevice = CallableDeviceOf<typeof SettingsStorePort>;

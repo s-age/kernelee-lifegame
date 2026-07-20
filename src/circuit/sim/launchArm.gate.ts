@@ -53,7 +53,7 @@ export function launchArmGate(kernel: Kernel, _payload: void): Verb<void> {
   kernel.buffer.mutate(LoopState, (loop) => (loop.phase === 'running' ? loop : { phase: 'running' as const }));
   // Only a fresh launch from idle proceeds to the `.spawn`; from 'stopping' we
   // merely recovered the phase to 'running' and reuse the in-flight loop.
-  return wasIdle ? next() : abort(undefined);
+  return wasIdle ? next() : abort(undefined, 'already active — no double start, in-flight loop reused');
 }
 
 /** Guards `Circuit.Sim.play` — bound in driver/wiring.ts's `bindGuards`. */
